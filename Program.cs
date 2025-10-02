@@ -47,7 +47,7 @@ public class TortoiseGitInjector
             try
             {
                 int currentHandle = candidateWindow.Current.NativeWindowHandle;
-                if (currentHandle == _processedDialogHandle) continue; // Skip the one we just handled
+                if (currentHandle == _processedDialogHandle && currentHandle != 0) continue; // Skip the one we just handled
 
                 if (tgitProcessIds.Contains(candidateWindow.Current.ProcessId) && candidateWindow.Current.Name.Contains("Commit", StringComparison.OrdinalIgnoreCase))
                 {
@@ -64,7 +64,10 @@ public class TortoiseGitInjector
             }
             catch (ElementNotAvailableException)
             {
-                _processedDialogHandle = 0; // Window disappeared, so reset
+                if (candidateWindow.Current.NativeWindowHandle == _processedDialogHandle)
+                {
+                    _processedDialogHandle = 0; // Window disappeared, so reset
+                }
                 continue;
             }
         }
@@ -186,13 +189,11 @@ public static class RepoFinder
         try
         {
             int processId = commitDialog.Current.ProcessId;
-            // This is now a synchronous call that internally uses Task.Run
             string? startingPath = GetPathFromProcess(processId);
 
             if (string.IsNullOrEmpty(startingPath))
             {
                 Console.WriteLine("Could not find path from command line, trying window title as fallback.");
-                // **FIXED REGEX**: This robustly finds a Windows path in the title.
                 var match = Regex.Match(commitDialog.Current.Name, @"([A-Z]:\\[^-\r\n]+)");
                 if (match.Success)
                 {
@@ -218,8 +219,6 @@ public static class RepoFinder
 
     private static string? GetPathFromProcess(int processId)
     {
-        // We use Task.Run to push the WMI query to a background thread,
-        // then block the main STA thread for the result. This is safe.
         return Task.Run(() =>
         {
             try
@@ -260,7 +259,6 @@ public static class RepoFinder
 
 public class Program
 {
-    // **FIXED**: The main loop is now a synchronous void method.
     private static void ApplicationLoop()
     {
         var injector = new TortoiseGitInjector();
@@ -268,73 +266,74 @@ public class Program
 
         while (true)
         {
-            // All code inside this loop now runs on the main STA thread.
             if (injector.TryFindNewCommitDialog(out var commitDialog, out var messageBox) && commitDialog != null && messageBox != null)
             {
                 Console.WriteLine("New commit dialog found. Processing...");
                 string? existingText = injector.GetCommitMessage(messageBox);
-
-                if (existingText == null) continue; // Dialog might be closing
+                if (existingText == null) continue;
 
                 injector.SetCommitMessage(messageBox, "Generating commit message... [Detecting repository]");
-
                 string? repoRoot = RepoFinder.FindRepoRootFromDialog(commitDialog);
 
                 if (string.IsNullOrEmpty(repoRoot))
                 {
                     injector.SetCommitMessage(messageBox, "Error: Could not determine the Git repository root.");
-                    Thread.Sleep(3000);
-                    continue;
+                    Thread.Sleep(3000); continue;
                 }
 
                 injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
-
-                // **FIXED**: Block the STA thread while async I/O operations complete.
                 string gitDiff = GitDiffHelper.GetStagedDiffAsync(repoRoot).GetAwaiter().GetResult();
                 string prompt;
+
+                // *** PROMPT ENGINEERING FIXES ARE HERE ***
 
                 if (gitDiff.StartsWith("Error:"))
                 {
                     injector.SetCommitMessage(messageBox, gitDiff);
-                    Thread.Sleep(3000);
-                    continue;
+                    Thread.Sleep(3000); continue;
                 }
 
                 if (string.IsNullOrWhiteSpace(gitDiff))
                 {
-                    prompt = !string.IsNullOrWhiteSpace(existingText)
-                       ? $"Refine the following Git commit message to follow conventional commit standards. Make it clear and concise. Original message: '{existingText}'"
-                       : "There are no staged changes. Generate a generic placeholder commit message for a small fix or documentation update, following conventional commit standards.";
+                    if (!string.IsNullOrWhiteSpace(existingText))
+                    {
+                        // ** IMPROVED PROMPT for refining existing text **
+                        prompt = "Rewrite the following Git commit message to strictly follow the conventional commit standard. Make it clear and concise.\n" +
+                                 "Your response MUST be only the raw, improved commit message text. Do not provide explanations, options, or commentary about your changes.\n\n" +
+                                 $"Original message:\n'{existingText}'";
+                    }
+                    else
+                    {
+                        // ** IMPROVED PROMPT for a generic placeholder **
+                        prompt = "Generate a generic placeholder conventional commit message for a small, unspecified change (like a typo fix or documentation update).\n" +
+                                 "Your response MUST be only the raw commit message text, for example: 'docs: Update README'. Do not provide any explanation.";
+                    }
                 }
                 else
                 {
-                    prompt = "You are an expert programmer who writes excellent, concise, and descriptive commit messages.\n" +
-                             "Based on the following git diff, generate a commit message following the conventional commit specification.\n" +
-                             "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes.\n\n" +
-                             "Here is the diff:\n\n" +
+                    // ** IMPROVED PROMPT for generating from a diff **
+                    prompt = "You are a tool that generates Git commit messages.\n" +
+                             "Based on the provided git diff, create a concise, conventional commit message.\n" +
+                             "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes.\n" +
+                             "Your response MUST be only the raw commit message text and nothing else. Do not include explanations, options, or markdown formatting.\n\n" +
+                             "Here is the diff:\n" +
                              "```diff\n" +
                              $"{gitDiff}\n" +
                              "```";
                 }
 
-                // **FIXED**: Block the STA thread for the API call.
                 string finalMessage = GeminiApiClient.GenerateCommitMessageAsync(prompt).GetAwaiter().GetResult();
-                injector.SetCommitMessage(messageBox, finalMessage);
+                injector.SetCommitMessage(messageBox, finalMessage.Trim()); // Trim to remove potential leading/trailing whitespace
 
                 Console.WriteLine("Message set. Monitoring for next dialog...");
             }
-            Thread.Sleep(500); // Replaced Task.Delay with Thread.Sleep
+            Thread.Sleep(500);
         }
     }
 
     public static void Main(string[] args)
     {
-        var appThread = new Thread(() =>
-        {
-            // **FIXED**: Call the synchronous ApplicationLoop method.
-            ApplicationLoop();
-        });
-
+        var appThread = new Thread(ApplicationLoop);
         appThread.SetApartmentState(ApartmentState.STA);
         appThread.Start();
         appThread.Join();
