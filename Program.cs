@@ -117,8 +117,8 @@ public static class GeminiApiClient
 
     public static async Task<string> GenerateCommitMessageAsync(string prompt)
     {
-        string? apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
-        if (string.IsNullOrEmpty(apiKey)) return "Error: GEMINI_API_KEY environment variable not set.";
+        string? apiKey = Environment.GetEnvironmentVariable("TORTOISEGIT_GEMINI_API_KEY");
+        if (string.IsNullOrEmpty(apiKey)) return "Error: TORTOISEGIT_GEMINI_API_KEY environment variable not set.";
 
         var requestBody = new GeminiRequest { Contents = new[] { new Content { Parts = new[] { new Part { Text = prompt } } } } };
         try
@@ -151,31 +151,47 @@ public static class GitDiffHelper
 {
     public static async Task<string> GetDiffAsync(string workingDirectory)
     {
-        var processStartInfo = new ProcessStartInfo
-        {
-            FileName = "git",
-            Arguments = "diff",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            WorkingDirectory = workingDirectory
-        };
+        string output = string.Empty;
+        string error = string.Empty;
         try
         {
-            using var process = new Process { StartInfo = processStartInfo };
+            var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = "diff",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    WorkingDirectory = workingDirectory
+                }
+            };
+            var outputBuilder = new StringBuilder();
+            var errorBuilder = new StringBuilder();
+            process.OutputDataReceived += (sender, args) => outputBuilder.AppendLine(args.Data);
+            process.ErrorDataReceived += (sender, args) => errorBuilder.AppendLine(args.Data);
             process.Start();
-            Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
-            Task<string> errorTask = process.StandardError.ReadToEndAsync();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
             await process.WaitForExitAsync();
-            string output = await outputTask;
-            string error = await errorTask;
-            if (process.ExitCode != 0) return $"Error: Git command failed with exit code {process.ExitCode}.\n{error}";
+            output = outputBuilder.ToString();
+            error = errorBuilder.ToString();
+            if (process.ExitCode != 0)
+            {
+                return $"Error: Git command failed with exit code {process.ExitCode}.\n{error}";
+            }
             return output;
         }
-        catch (Win32Exception) { return "Error: 'git' command not found. Ensure Git is installed and in your system's PATH."; }
-        catch (Exception ex) { return $"Error: An unexpected exception occurred while running git. {ex.Message}"; }
+        catch (Win32Exception)
+        {
+            return "Error: 'git' command not found. Ensure Git is installed and in your system's PATH.";
+        }
+        catch (Exception ex)
+        {
+            return $"Error: An unexpected exception occurred while running git. {ex.Message}";
+        }
     }
 }
 
@@ -191,10 +207,16 @@ public static class RepoFinder
             if (string.IsNullOrEmpty(startingPath))
             {
                 Console.WriteLine("Could not find path from command line, trying window title as fallback.");
-                var match = Regex.Match(commitDialog.Current.Name, @"([A-Z]:\\[^-\r\n]+)");
-                if (match.Success)
+                int index = commitDialog.Current.Name.IndexOf(" - Commit");
+                if (index >= 0)
+                    startingPath = commitDialog.Current.Name.Substring(0, index);
+                else
                 {
-                    startingPath = match.Groups[1].Value.Trim();
+                    var match = Regex.Match(commitDialog.Current.Name, @"([A-Z]:\\[^-\r\n]+)");
+                    if (match.Success)
+                    {
+                        startingPath = match.Groups[1].Value.Trim();
+                    }
                 }
             }
 
@@ -204,7 +226,7 @@ public static class RepoFinder
                 return null;
             }
             Console.WriteLine($"Found starting path: {startingPath}");
-            return FindGitRootFromPath(startingPath);
+            return startingPath;  //FindGitRootFromPath(startingPath);
         }
         catch (Exception ex)
         {
