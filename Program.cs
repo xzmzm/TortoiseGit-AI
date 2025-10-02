@@ -160,7 +160,7 @@ public static class GitDiffHelper
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = "git",
-                    Arguments = "diff",
+                    Arguments = "diff HEAD",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,

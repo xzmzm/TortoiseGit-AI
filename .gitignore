@@ -1,0 +1,30 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.sln.docstates
+
+# Build results
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+
+# Rider
+.idea/
+*.sln.iml
+
+# User-specific
+*.userprefs
+*.DS_Store
+
+# Build artifacts
+*.exe
+*.dll
+*.pdb
+*.nupkg
+*.snk
+*.prof
+*.cache
+
+# Log files
+*.log
