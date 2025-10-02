@@ -37,7 +37,7 @@ public class TortoiseGitInjector
         var tgitProcessIds = Process.GetProcessesByName("TortoiseGitProc").Select(p => p.Id).ToHashSet();
         if (tgitProcessIds.Count == 0)
         {
-            _processedDialogHandle = 0; // Reset if all processes are gone
+            _processedDialogHandle = 0;
             return false;
         }
 
@@ -47,7 +47,7 @@ public class TortoiseGitInjector
             try
             {
                 int currentHandle = candidateWindow.Current.NativeWindowHandle;
-                if (currentHandle == _processedDialogHandle && currentHandle != 0) continue; // Skip the one we just handled
+                if (currentHandle == _processedDialogHandle && currentHandle != 0) continue;
 
                 if (tgitProcessIds.Contains(candidateWindow.Current.ProcessId) && candidateWindow.Current.Name.Contains("Commit", StringComparison.OrdinalIgnoreCase))
                 {
@@ -57,17 +57,14 @@ public class TortoiseGitInjector
                     {
                         commitDialog = candidateWindow;
                         messageBox = foundMessageBox;
-                        _processedDialogHandle = currentHandle; // Mark this handle as processed
+                        _processedDialogHandle = currentHandle;
                         return true;
                     }
                 }
             }
             catch (ElementNotAvailableException)
             {
-                if (candidateWindow.Current.NativeWindowHandle == _processedDialogHandle)
-                {
-                    _processedDialogHandle = 0; // Window disappeared, so reset
-                }
+                if (candidateWindow.Current.NativeWindowHandle == _processedDialogHandle) { _processedDialogHandle = 0; }
                 continue;
             }
         }
@@ -152,12 +149,12 @@ public class Part { [JsonPropertyName("text")] public string Text { get; set; } 
 #region Git & Repo Helpers
 public static class GitDiffHelper
 {
-    public static async Task<string> GetStagedDiffAsync(string workingDirectory)
+    public static async Task<string> GetDiffAsync(string workingDirectory)
     {
         var processStartInfo = new ProcessStartInfo
         {
             FileName = "git",
-            Arguments = "diff --staged",
+            Arguments = "diff",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -206,7 +203,6 @@ public static class RepoFinder
                 Console.WriteLine($"Could not determine a starting path from title: '{commitDialog.Current.Name}'");
                 return null;
             }
-
             Console.WriteLine($"Found starting path: {startingPath}");
             return FindGitRootFromPath(startingPath);
         }
@@ -268,7 +264,7 @@ public class Program
         {
             if (injector.TryFindNewCommitDialog(out var commitDialog, out var messageBox) && commitDialog != null && messageBox != null)
             {
-                Console.WriteLine("New commit dialog found. Processing...");
+                Console.WriteLine("\n--- New Commit Dialog Found ---");
                 string? existingText = injector.GetCommitMessage(messageBox);
                 if (existingText == null) continue;
 
@@ -277,16 +273,15 @@ public class Program
 
                 if (string.IsNullOrEmpty(repoRoot))
                 {
-                    injector.SetCommitMessage(messageBox, "Error: Could not determine the Git repository root.");
+                    injector.SetCommitMessage(messageBox, "Error: Could not determine Git repository root.");
                     Thread.Sleep(3000); continue;
                 }
 
                 injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
-                string gitDiff = GitDiffHelper.GetStagedDiffAsync(repoRoot).GetAwaiter().GetResult();
+                string gitDiff = GitDiffHelper.GetDiffAsync(repoRoot).GetAwaiter().GetResult();
                 string prompt;
 
-                // *** PROMPT ENGINEERING FIXES ARE HERE ***
-
+                // *** HYPER-SPECIFIC PROMPT ENGINEERING ***
                 if (gitDiff.StartsWith("Error:"))
                 {
                     injector.SetCommitMessage(messageBox, gitDiff);
@@ -297,35 +292,49 @@ public class Program
                 {
                     if (!string.IsNullOrWhiteSpace(existingText))
                     {
-                        // ** IMPROVED PROMPT for refining existing text **
-                        prompt = "Rewrite the following Git commit message to strictly follow the conventional commit standard. Make it clear and concise.\n" +
-                                 "Your response MUST be only the raw, improved commit message text. Do not provide explanations, options, or commentary about your changes.\n\n" +
-                                 $"Original message:\n'{existingText}'";
+                        prompt = "You are an automated tool that rewrites Git commit messages to follow the conventional commit standard. " +
+                                 "Take the user's draft and output a complete, industry-standard commit message. " +
+                                 "Your response MUST be only the raw commit message. DO NOT use placeholders like '[Insert Issue Number/ID]'. DO NOT add any commentary or explanation.\n\n" +
+                                 $"User's draft: '{existingText}'";
                     }
                     else
                     {
-                        // ** IMPROVED PROMPT for a generic placeholder **
-                        prompt = "Generate a generic placeholder conventional commit message for a small, unspecified change (like a typo fix or documentation update).\n" +
-                                 "Your response MUST be only the raw commit message text, for example: 'docs: Update README'. Do not provide any explanation.";
+                        prompt = "You are an automated tool that generates Git commit messages. " +
+                                 "Generate a complete and usable conventional commit message for a minor, unspecified change. Example: 'chore: Minor code cleanup'. " +
+                                 "Your response MUST be only the raw commit message. DO NOT use placeholders or provide any explanation.";
                     }
                 }
                 else
                 {
-                    // ** IMPROVED PROMPT for generating from a diff **
-                    prompt = "You are a tool that generates Git commit messages.\n" +
-                             "Based on the provided git diff, create a concise, conventional commit message.\n" +
-                             "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes.\n" +
-                             "Your response MUST be only the raw commit message text and nothing else. Do not include explanations, options, or markdown formatting.\n\n" +
-                             "Here is the diff:\n" +
+                    prompt = "You are an expert git commit message generation tool. " +
+                             "Based on the following git diff, create a concise, conventional commit message. " +
+                             "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
+                             "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
+                             "Diff:\n" +
                              "```diff\n" +
                              $"{gitDiff}\n" +
                              "```";
                 }
 
-                string finalMessage = GeminiApiClient.GenerateCommitMessageAsync(prompt).GetAwaiter().GetResult();
-                injector.SetCommitMessage(messageBox, finalMessage.Trim()); // Trim to remove potential leading/trailing whitespace
+                // *** ADDED DEBUGGING LOGS ***
+                Console.WriteLine("--- Sending Request to Gemini ---");
+                Console.WriteLine($"[Existing Text]: {existingText}");
+                Console.WriteLine($"[Git Diff Length]: {gitDiff.Length} characters");
+                Console.WriteLine($"[Generated Prompt]:\n{prompt}");
+                Console.WriteLine("---------------------------------");
 
-                Console.WriteLine("Message set. Monitoring for next dialog...");
+                string finalMessage = GeminiApiClient.GenerateCommitMessageAsync(prompt).GetAwaiter().GetResult();
+
+                // *** ADDED SAFETY NET / SANITIZATION ***
+                if (finalMessage.Contains("[") && (finalMessage.Contains("Insert") || finalMessage.Contains("Issue") || finalMessage.Contains("Your ")))
+                {
+                    Console.WriteLine("!!! WARNING: AI returned a template. Falling back to a default message. !!!");
+                    finalMessage = "chore: Minor update";
+                }
+
+                injector.SetCommitMessage(messageBox, finalMessage.Trim());
+
+                Console.WriteLine($"Message set. Monitoring for next dialog...");
             }
             Thread.Sleep(500);
         }
