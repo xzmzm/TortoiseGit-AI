@@ -149,40 +149,109 @@ public class Part { [JsonPropertyName("text")] public string Text { get; set; } 
 #region Git & Repo Helpers
 public static class GitDiffHelper
 {
+    private static async Task<(string output, string error, int exitCode)> RunGitCommandAsync(string arguments, string workingDirectory)
+    {
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                WorkingDirectory = workingDirectory,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            }
+        };
+
+        var outputBuilder = new StringBuilder();
+        var errorBuilder = new StringBuilder();
+
+        process.OutputDataReceived += (sender, args) => { if (args.Data != null) outputBuilder.AppendLine(args.Data); };
+        process.ErrorDataReceived += (sender, args) => { if (args.Data != null) errorBuilder.AppendLine(args.Data); };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        await process.WaitForExitAsync();
+
+        return (outputBuilder.ToString().TrimEnd(), errorBuilder.ToString().TrimEnd(), process.ExitCode);
+    }
+
     public static async Task<string> GetDiffAsync(string workingDirectory)
     {
-        string output = string.Empty;
-        string error = string.Empty;
         try
         {
-            var process = new Process
+            // First, check for any changes. If not, no context is needed.
+            var (statusOutput, statusError, statusExitCode) = await RunGitCommandAsync("status --short", workingDirectory);
+            if (statusExitCode != 0)
             {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "git",
-                    Arguments = "diff HEAD",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    WorkingDirectory = workingDirectory
-                }
-            };
-            var outputBuilder = new StringBuilder();
-            var errorBuilder = new StringBuilder();
-            process.OutputDataReceived += (sender, args) => outputBuilder.AppendLine(args.Data);
-            process.ErrorDataReceived += (sender, args) => errorBuilder.AppendLine(args.Data);
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            await process.WaitForExitAsync();
-            output = outputBuilder.ToString();
-            error = errorBuilder.ToString();
-            if (process.ExitCode != 0)
-            {
-                return $"Error: Git command failed with exit code {process.ExitCode}.\n{error}";
+                Console.WriteLine($"Warning: 'git status' command failed with exit code {statusExitCode}:\n{statusError}");
             }
-            return output;
+
+            if (string.IsNullOrWhiteSpace(statusOutput))
+            {
+                return string.Empty; // No changes found, return empty string to trigger rewrite/placeholder logic.
+            }
+
+            var fullContext = new StringBuilder();
+
+            // 1. Recent commits for historical context
+            var (logOutput, logError, logExitCode) = await RunGitCommandAsync("log -n 5 --oneline --no-decorate", workingDirectory);
+            if (logExitCode == 0 && !string.IsNullOrWhiteSpace(logOutput))
+            {
+                fullContext.AppendLine("Recent commits:");
+                fullContext.AppendLine(logOutput);
+                fullContext.AppendLine();
+            }
+            else if (logExitCode != 0) { Console.WriteLine($"Warning: 'git log' failed with exit code {logExitCode}:\n{logError}"); }
+
+            // 2. Changed files for a high-level overview
+            fullContext.AppendLine("Changed files:");
+            fullContext.AppendLine(statusOutput); // Re-use status output from our initial check
+            fullContext.AppendLine();
+
+            fullContext.AppendLine("Full diff:");
+
+            // 3. Unstaged changes
+            var (diffOutput, diffError, diffExitCode) = await RunGitCommandAsync("diff HEAD", workingDirectory);
+            if (diffExitCode != 0) return $"Error: 'git diff HEAD' failed.\n{diffError}";
+            if (!string.IsNullOrWhiteSpace(diffOutput)) fullContext.AppendLine(diffOutput);
+
+            // 4. Staged changes (what will be committed)
+            var (cachedDiffOutput, cachedDiffError, cachedDiffExitCode) = await RunGitCommandAsync("diff --cached HEAD", workingDirectory);
+            if (cachedDiffExitCode != 0) return $"Error: 'git diff --cached HEAD' failed.\n{cachedDiffError}";
+            if (!string.IsNullOrWhiteSpace(cachedDiffOutput)) fullContext.AppendLine(cachedDiffOutput);
+
+            // 5. Untracked files, treated as new files in the diff
+            var (untrackedFilesOutput, untrackedFilesError, untrackedFilesExitCode) = await RunGitCommandAsync("ls-files --others --exclude-standard", workingDirectory);
+            if (untrackedFilesExitCode == 0 && !string.IsNullOrWhiteSpace(untrackedFilesOutput))
+            {
+                var untrackedFiles = untrackedFilesOutput.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var file in untrackedFiles)
+                {
+                    // Git on Windows understands /dev/null. Quote files with spaces.
+                    string escapedFile = file.Contains(' ') ? $"\"{file}\"" : file;
+                    var (untrackedDiffOutput, untrackedDiffError, untrackedDiffExitCode) = await RunGitCommandAsync($"diff --no-index /dev/null {escapedFile}", workingDirectory);
+
+                    // For `git diff`, exit code 1 means there are differences, which is not an error here.
+                    if (untrackedDiffExitCode > 1)
+                    {
+                        Console.WriteLine($"Warning: 'git diff' for untracked file '{file}' failed with exit code {untrackedDiffExitCode}:\n{untrackedDiffError}");
+                    }
+                    if (!string.IsNullOrWhiteSpace(untrackedDiffOutput)) fullContext.AppendLine(untrackedDiffOutput);
+                }
+            }
+            else if (untrackedFilesExitCode != 0)
+            {
+                Console.WriteLine($"Warning: 'git ls-files' failed with exit code {untrackedFilesExitCode}:\n{untrackedFilesError}");
+            }
+
+            return fullContext.ToString();
         }
         catch (Win32Exception)
         {
@@ -190,7 +259,7 @@ public static class GitDiffHelper
         }
         catch (Exception ex)
         {
-            return $"Error: An unexpected exception occurred while running git. {ex.Message}";
+            return $"Error: An unexpected exception occurred while gathering git context. {ex.Message}";
         }
     }
 }
@@ -300,17 +369,17 @@ public class Program
                 }
 
                 injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
-                string gitDiff = GitDiffHelper.GetDiffAsync(repoRoot).GetAwaiter().GetResult();
+                string gitContext = GitDiffHelper.GetDiffAsync(repoRoot).GetAwaiter().GetResult();
                 string prompt;
 
                 // *** HYPER-SPECIFIC PROMPT ENGINEERING ***
-                if (gitDiff.StartsWith("Error:"))
+                if (gitContext.StartsWith("Error:"))
                 {
-                    injector.SetCommitMessage(messageBox, gitDiff);
+                    injector.SetCommitMessage(messageBox, gitContext);
                     Thread.Sleep(3000); continue;
                 }
 
-                if (string.IsNullOrWhiteSpace(gitDiff))
+                if (string.IsNullOrWhiteSpace(gitContext))
                 {
                     if (!string.IsNullOrWhiteSpace(existingText))
                     {
@@ -329,19 +398,19 @@ public class Program
                 else
                 {
                     prompt = "You are an expert git commit message generation tool. " +
-                             "Based on the following git diff, create a concise, conventional commit message. " +
+                             "Based on the following git context (recent commits, changed files, and full diff), create a concise, conventional commit message. " +
                              "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
                              "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
-                             "Diff:\n" +
-                             "```diff\n" +
-                             $"{gitDiff}\n" +
+                             "Git Context:\n" +
+                             "```\n" +
+                             $"{gitContext}\n" +
                              "```";
                 }
 
                 // *** ADDED DEBUGGING LOGS ***
                 Console.WriteLine("--- Sending Request to Gemini ---");
                 Console.WriteLine($"[Existing Text]: {existingText}");
-                Console.WriteLine($"[Git Diff Length]: {gitDiff.Length} characters");
+                Console.WriteLine($"[Git Context Length]: {gitContext.Length} characters");
                 Console.WriteLine($"[Generated Prompt]:\n{prompt}");
                 Console.WriteLine("---------------------------------");
 
