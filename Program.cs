@@ -227,29 +227,29 @@ public static class GitDiffHelper
             if (cachedDiffExitCode != 0) return $"Error: 'git diff --cached HEAD' failed.\n{cachedDiffError}";
             if (!string.IsNullOrWhiteSpace(cachedDiffOutput)) fullContext.AppendLine(cachedDiffOutput);
 
-            // 5. Untracked files, treated as new files in the diff
-            var (untrackedFilesOutput, untrackedFilesError, untrackedFilesExitCode) = await RunGitCommandAsync("ls-files --others --exclude-standard", workingDirectory);
-            if (untrackedFilesExitCode == 0 && !string.IsNullOrWhiteSpace(untrackedFilesOutput))
-            {
-                var untrackedFiles = untrackedFilesOutput.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var file in untrackedFiles)
-                {
-                    // Git on Windows understands /dev/null. Quote files with spaces.
-                    string escapedFile = file.Contains(' ') ? $"\"{file}\"" : file;
-                    var (untrackedDiffOutput, untrackedDiffError, untrackedDiffExitCode) = await RunGitCommandAsync($"diff --no-index /dev/null {escapedFile}", workingDirectory);
+            //// 5. Untracked files, treated as new files in the diff
+            //var (untrackedFilesOutput, untrackedFilesError, untrackedFilesExitCode) = await RunGitCommandAsync("ls-files --others --exclude-standard", workingDirectory);
+            //if (untrackedFilesExitCode == 0 && !string.IsNullOrWhiteSpace(untrackedFilesOutput))
+            //{
+            //    var untrackedFiles = untrackedFilesOutput.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+            //    foreach (var file in untrackedFiles)
+            //    {
+            //        // Git on Windows understands /dev/null. Quote files with spaces.
+            //        string escapedFile = file.Contains(' ') ? $"\"{file}\"" : file;
+            //        var (untrackedDiffOutput, untrackedDiffError, untrackedDiffExitCode) = await RunGitCommandAsync($"diff --no-index /dev/null {escapedFile}", workingDirectory);
 
-                    // For `git diff`, exit code 1 means there are differences, which is not an error here.
-                    if (untrackedDiffExitCode > 1)
-                    {
-                        Console.WriteLine($"Warning: 'git diff' for untracked file '{file}' failed with exit code {untrackedDiffExitCode}:\n{untrackedDiffError}");
-                    }
-                    if (!string.IsNullOrWhiteSpace(untrackedDiffOutput)) fullContext.AppendLine(untrackedDiffOutput);
-                }
-            }
-            else if (untrackedFilesExitCode != 0)
-            {
-                Console.WriteLine($"Warning: 'git ls-files' failed with exit code {untrackedFilesExitCode}:\n{untrackedFilesError}");
-            }
+            //        // For `git diff`, exit code 1 means there are differences, which is not an error here.
+            //        if (untrackedDiffExitCode > 1)
+            //        {
+            //            Console.WriteLine($"Warning: 'git diff' for untracked file '{file}' failed with exit code {untrackedDiffExitCode}:\n{untrackedDiffError}");
+            //        }
+            //        if (!string.IsNullOrWhiteSpace(untrackedDiffOutput)) fullContext.AppendLine(untrackedDiffOutput);
+            //    }
+            //}
+            //else if (untrackedFilesExitCode != 0)
+            //{
+            //    Console.WriteLine($"Warning: 'git ls-files' failed with exit code {untrackedFilesExitCode}:\n{untrackedFilesError}");
+            //}
 
             return fullContext.ToString();
         }
