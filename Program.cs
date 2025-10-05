@@ -1,9 +1,11 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Management;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -27,48 +29,12 @@ internal static class NativeMethods
 public class TortoiseGitInjector
 {
     private const string COMMIT_TEXTBOX_CLASS_NAME = "Scintilla";
-    private int _processedDialogHandle = 0;
 
-    public bool TryFindNewCommitDialog(out AutomationElement? commitDialog, out AutomationElement? messageBox)
+    public bool TryFindMessageBox(AutomationElement commitDialog, out AutomationElement? messageBox)
     {
-        commitDialog = null;
-        messageBox = null;
-
-        var tgitProcessIds = Process.GetProcessesByName("TortoiseGitProc").Select(p => p.Id).ToHashSet();
-        if (tgitProcessIds.Count == 0)
-        {
-            _processedDialogHandle = 0;
-            return false;
-        }
-
-        AutomationElementCollection topLevelWindows = AutomationElement.RootElement.FindAll(TreeScope.Children, Condition.TrueCondition);
-        foreach (AutomationElement candidateWindow in topLevelWindows)
-        {
-            try
-            {
-                int currentHandle = candidateWindow.Current.NativeWindowHandle;
-                if (currentHandle == _processedDialogHandle && currentHandle != 0) continue;
-
-                if (tgitProcessIds.Contains(candidateWindow.Current.ProcessId) && candidateWindow.Current.Name.Contains("Commit", StringComparison.OrdinalIgnoreCase))
-                {
-                    var textCondition = new PropertyCondition(AutomationElement.ClassNameProperty, COMMIT_TEXTBOX_CLASS_NAME);
-                    var foundMessageBox = candidateWindow.FindFirst(TreeScope.Descendants, textCondition);
-                    if (foundMessageBox != null)
-                    {
-                        commitDialog = candidateWindow;
-                        messageBox = foundMessageBox;
-                        _processedDialogHandle = currentHandle;
-                        return true;
-                    }
-                }
-            }
-            catch (ElementNotAvailableException)
-            {
-                if (candidateWindow.Current.NativeWindowHandle == _processedDialogHandle) { _processedDialogHandle = 0; }
-                continue;
-            }
-        }
-        return false;
+        var textCondition = new PropertyCondition(AutomationElement.ClassNameProperty, COMMIT_TEXTBOX_CLASS_NAME);
+        messageBox = commitDialog.FindFirst(TreeScope.Descendants, textCondition);
+        return messageBox != null;
     }
 
     public string? GetCommitMessage(AutomationElement messageBox)
@@ -79,30 +45,60 @@ public class TortoiseGitInjector
 
     public bool SetCommitMessage(AutomationElement messageBox, string text)
     {
-        IDataObject? originalClipboardData = null;
+        // AutomationElement must be used on the thread it was created on (UIA event thread, which is MTA).
+        // Clipboard operations must happen on an STA thread.
+        // So, we get the window handle here, then perform clipboard actions on a new STA thread.
+        int nativeHandle;
         try
         {
-            IntPtr hwnd = new IntPtr(messageBox.Current.NativeWindowHandle);
+            nativeHandle = messageBox.Current.NativeWindowHandle;
             messageBox.SetFocus();
-            NativeMethods.SendMessage(hwnd, NativeMethods.SCI_SELECTALL, 0, 0);
-            originalClipboardData = Clipboard.GetDataObject();
-            Clipboard.SetText(text);
-            NativeMethods.SendMessage(hwnd, NativeMethods.WM_PASTE, IntPtr.Zero, IntPtr.Zero);
-            return true;
+        }
+        catch (ElementNotAvailableException)
+        {
+            Console.WriteLine("Error: UI element disappeared before it could be used.");
+            return false;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error during clipboard paste operation: {ex.Message}");
+            Console.WriteLine($"Error preparing for message injection: {ex.Message}");
             return false;
         }
-        finally
+
+        var success = false;
+        var thread = new Thread(() =>
         {
-            if (originalClipboardData != null)
+            IDataObject? originalClipboardData = null;
+            try
             {
-                try { Clipboard.SetDataObject(originalClipboardData, true, 5, 100); }
-                catch (Exception clipEx) { Console.WriteLine($"Failed to restore clipboard: {clipEx.Message}"); }
+                var hwnd = new IntPtr(nativeHandle);
+                // These operations are now safely on an STA thread.
+                NativeMethods.SendMessage(hwnd, NativeMethods.SCI_SELECTALL, IntPtr.Zero, IntPtr.Zero);
+                originalClipboardData = Clipboard.GetDataObject();
+                Clipboard.SetText(text);
+                NativeMethods.SendMessage(hwnd, NativeMethods.WM_PASTE, IntPtr.Zero, IntPtr.Zero);
+                success = true;
             }
-        }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error during clipboard paste operation: {ex.Message}");
+                success = false;
+            }
+            finally
+            {
+                if (originalClipboardData != null)
+                {
+                    try { Clipboard.SetDataObject(originalClipboardData, true, 5, 100); }
+                    catch (Exception clipEx) { Console.WriteLine($"Failed to restore clipboard: {clipEx.Message}"); }
+                }
+            }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        return success;
     }
 }
 #endregion
@@ -186,7 +182,6 @@ public static class GitDiffHelper
     {
         try
         {
-            // First, check for any changes. If not, no context is needed.
             var (statusOutput, statusError, statusExitCode) = await RunGitCommandAsync("status --short", workingDirectory);
             if (statusExitCode != 0)
             {
@@ -195,12 +190,11 @@ public static class GitDiffHelper
 
             if (string.IsNullOrWhiteSpace(statusOutput))
             {
-                return string.Empty; // No changes found, return empty string to trigger rewrite/placeholder logic.
+                return string.Empty;
             }
 
             var fullContext = new StringBuilder();
 
-            // 1. Recent commits for historical context
             var (logOutput, logError, logExitCode) = await RunGitCommandAsync("log -n 5 --oneline --no-decorate", workingDirectory);
             if (logExitCode == 0 && !string.IsNullOrWhiteSpace(logOutput))
             {
@@ -210,46 +204,19 @@ public static class GitDiffHelper
             }
             else if (logExitCode != 0) { Console.WriteLine($"Warning: 'git log' failed with exit code {logExitCode}:\n{logError}"); }
 
-            // 2. Changed files for a high-level overview
             fullContext.AppendLine("Changed files:");
-            fullContext.AppendLine(statusOutput); // Re-use status output from our initial check
+            fullContext.AppendLine(statusOutput);
             fullContext.AppendLine();
 
             fullContext.AppendLine("Full diff:");
 
-            // 3. Unstaged changes
             var (diffOutput, diffError, diffExitCode) = await RunGitCommandAsync("diff HEAD", workingDirectory);
             if (diffExitCode != 0) return $"Error: 'git diff HEAD' failed.\n{diffError}";
             if (!string.IsNullOrWhiteSpace(diffOutput)) fullContext.AppendLine(diffOutput);
 
-            // 4. Staged changes (what will be committed)
             var (cachedDiffOutput, cachedDiffError, cachedDiffExitCode) = await RunGitCommandAsync("diff --cached HEAD", workingDirectory);
             if (cachedDiffExitCode != 0) return $"Error: 'git diff --cached HEAD' failed.\n{cachedDiffError}";
             if (!string.IsNullOrWhiteSpace(cachedDiffOutput)) fullContext.AppendLine(cachedDiffOutput);
-
-            //// 5. Untracked files, treated as new files in the diff
-            //var (untrackedFilesOutput, untrackedFilesError, untrackedFilesExitCode) = await RunGitCommandAsync("ls-files --others --exclude-standard", workingDirectory);
-            //if (untrackedFilesExitCode == 0 && !string.IsNullOrWhiteSpace(untrackedFilesOutput))
-            //{
-            //    var untrackedFiles = untrackedFilesOutput.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-            //    foreach (var file in untrackedFiles)
-            //    {
-            //        // Git on Windows understands /dev/null. Quote files with spaces.
-            //        string escapedFile = file.Contains(' ') ? $"\"{file}\"" : file;
-            //        var (untrackedDiffOutput, untrackedDiffError, untrackedDiffExitCode) = await RunGitCommandAsync($"diff --no-index /dev/null {escapedFile}", workingDirectory);
-
-            //        // For `git diff`, exit code 1 means there are differences, which is not an error here.
-            //        if (untrackedDiffExitCode > 1)
-            //        {
-            //            Console.WriteLine($"Warning: 'git diff' for untracked file '{file}' failed with exit code {untrackedDiffExitCode}:\n{untrackedDiffError}");
-            //        }
-            //        if (!string.IsNullOrWhiteSpace(untrackedDiffOutput)) fullContext.AppendLine(untrackedDiffOutput);
-            //    }
-            //}
-            //else if (untrackedFilesExitCode != 0)
-            //{
-            //    Console.WriteLine($"Warning: 'git ls-files' failed with exit code {untrackedFilesExitCode}:\n{untrackedFilesError}");
-            //}
 
             return fullContext.ToString();
         }
@@ -295,7 +262,9 @@ public static class RepoFinder
                 return null;
             }
             Console.WriteLine($"Found starting path: {startingPath}");
-            return startingPath;  //FindGitRootFromPath(startingPath);
+
+            // The starting path *is* the working directory TortoiseGit uses, no need to search for .git root
+            return startingPath;
         }
         catch (Exception ex)
         {
@@ -306,136 +275,182 @@ public static class RepoFinder
 
     private static string? GetPathFromProcess(int processId)
     {
-        return Task.Run(() =>
+        try
         {
-            try
-            {
-                string query = $"SELECT CommandLine FROM Win32_Process WHERE ProcessId = {processId}";
-                using var searcher = new ManagementObjectSearcher(query);
-                using var collection = searcher.Get();
-                var commandLine = collection.OfType<ManagementObject>().Select(p => (string)p["CommandLine"]).FirstOrDefault();
-                if (commandLine == null) return null;
-                var match = Regex.Match(commandLine, @"/path:""([^""]+)""");
-                return match.Success ? match.Groups[1].Value : null;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"WMI query failed: {ex.Message}.");
-                return null;
-            }
-        }).GetAwaiter().GetResult();
-    }
-
-    private static string? FindGitRootFromPath(string path)
-    {
-        DirectoryInfo? currentDir = Directory.Exists(path) ? new DirectoryInfo(path) : Directory.GetParent(path);
-        while (currentDir != null)
-        {
-            if (Directory.Exists(Path.Combine(currentDir.FullName, ".git")))
-            {
-                Console.WriteLine($"Found Git repository root at: {currentDir.FullName}");
-                return currentDir.FullName;
-            }
-            currentDir = currentDir.Parent;
+            string query = $"SELECT CommandLine FROM Win32_Process WHERE ProcessId = {processId}";
+            using var searcher = new ManagementObjectSearcher(query);
+            using var collection = searcher.Get();
+            var commandLine = collection.OfType<ManagementObject>().Select(p => (string)p["CommandLine"]).FirstOrDefault();
+            if (commandLine == null) return null;
+            var match = Regex.Match(commandLine, @"/path:""([^""]+)""");
+            return match.Success ? match.Groups[1].Value : null;
         }
-        Console.WriteLine($"Failed to find a .git directory in any parent folder starting from '{path}'.");
-        return null;
+        catch (Exception ex)
+        {
+            Console.WriteLine($"WMI query failed: {ex.Message}.");
+            return null;
+        }
     }
 }
 #endregion
 
-public class Program
+#region Event-Driven Watcher
+public class CommitDialogWatcher : IDisposable
 {
-    private static void ApplicationLoop()
+    private readonly TortoiseGitInjector _injector;
+    private readonly AutomationEventHandler _windowOpenedHandler;
+    private readonly HashSet<int> _tgitProcessIds = new HashSet<int>();
+
+    public CommitDialogWatcher(TortoiseGitInjector injector)
     {
-        var injector = new TortoiseGitInjector();
-        Console.WriteLine("Monitoring for TortoiseGit commit dialog... (Press Ctrl+C to exit)");
+        _injector = injector;
+        // The handler delegate is stored in a field to prevent it from being garbage collected
+        _windowOpenedHandler = OnWindowOpened;
+    }
 
-        while (true)
+    public void Start()
+    {
+        Console.WriteLine("Starting event-driven monitoring for TortoiseGit commit dialog...");
+        UpdateTgitProcessList();
+        Automation.AddAutomationEventHandler(
+            WindowPattern.WindowOpenedEvent,
+            AutomationElement.RootElement,
+            TreeScope.Children,
+            _windowOpenedHandler);
+    }
+
+    private void UpdateTgitProcessList()
+    {
+        _tgitProcessIds.Clear();
+        foreach (var p in Process.GetProcessesByName("TortoiseGitProc"))
         {
-            if (injector.TryFindNewCommitDialog(out var commitDialog, out var messageBox) && commitDialog != null && messageBox != null)
-            {
-                Console.WriteLine("\n--- New Commit Dialog Found ---");
-                string? existingText = injector.GetCommitMessage(messageBox);
-                if (existingText == null) continue;
-
-                injector.SetCommitMessage(messageBox, "Generating commit message... [Detecting repository]");
-                string? repoRoot = RepoFinder.FindRepoRootFromDialog(commitDialog);
-
-                if (string.IsNullOrEmpty(repoRoot))
-                {
-                    injector.SetCommitMessage(messageBox, "Error: Could not determine Git repository root.");
-                    Thread.Sleep(3000); continue;
-                }
-
-                injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
-                string gitContext = GitDiffHelper.GetDiffAsync(repoRoot).GetAwaiter().GetResult();
-                string prompt;
-
-                // *** HYPER-SPECIFIC PROMPT ENGINEERING ***
-                if (gitContext.StartsWith("Error:"))
-                {
-                    injector.SetCommitMessage(messageBox, gitContext);
-                    Thread.Sleep(3000); continue;
-                }
-
-                if (string.IsNullOrWhiteSpace(gitContext))
-                {
-                    if (!string.IsNullOrWhiteSpace(existingText))
-                    {
-                        prompt = "You are an automated tool that rewrites Git commit messages to follow the conventional commit standard. " +
-                                 "Take the user's draft and output a complete, industry-standard commit message. " +
-                                 "Your response MUST be only the raw commit message. DO NOT use placeholders like '[Insert Issue Number/ID]'. DO NOT add any commentary or explanation.\n\n" +
-                                 $"User's draft: '{existingText}'";
-                    }
-                    else
-                    {
-                        prompt = "You are an automated tool that generates Git commit messages. " +
-                                 "Generate a complete and usable conventional commit message for a minor, unspecified change. Example: 'chore: Minor code cleanup'. " +
-                                 "Your response MUST be only the raw commit message. DO NOT use placeholders or provide any explanation.";
-                    }
-                }
-                else
-                {
-                    prompt = "You are an expert git commit message generation tool. " +
-                             "Based on the following git context (recent commits, changed files, and full diff), create a concise, conventional commit message. " +
-                             "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
-                             "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
-                             "Git Context:\n" +
-                             "```\n" +
-                             $"{gitContext}\n" +
-                             "```";
-                }
-
-                // *** ADDED DEBUGGING LOGS ***
-                Console.WriteLine("--- Sending Request to Gemini ---");
-                Console.WriteLine($"[Existing Text]: {existingText}");
-                Console.WriteLine($"[Git Context Length]: {gitContext.Length} characters");
-                Console.WriteLine($"[Generated Prompt]:\n{prompt}");
-                Console.WriteLine("---------------------------------");
-
-                string finalMessage = GeminiApiClient.GenerateCommitMessageAsync(prompt).GetAwaiter().GetResult();
-
-                // *** ADDED SAFETY NET / SANITIZATION ***
-                if (finalMessage.Contains("[") && (finalMessage.Contains("Insert") || finalMessage.Contains("Issue") || finalMessage.Contains("Your ")))
-                {
-                    Console.WriteLine("!!! WARNING: AI returned a template. Falling back to a default message. !!!");
-                    finalMessage = "chore: Minor update";
-                }
-
-                injector.SetCommitMessage(messageBox, finalMessage.Trim());
-
-                Console.WriteLine($"Message set. Monitoring for next dialog...");
-            }
-            Thread.Sleep(500);
+            _tgitProcessIds.Add(p.Id);
         }
     }
 
+    private async void OnWindowOpened(object sender, AutomationEventArgs e)
+    {
+        if (sender is not AutomationElement openedWindow) return;
+
+        try
+        {
+            // Refresh the process list in case TortoiseGitProc just started with this dialog
+            UpdateTgitProcessList();
+
+            // Quick filters to ignore irrelevant windows
+            if (!_tgitProcessIds.Contains(openedWindow.Current.ProcessId)) return;
+            if (!openedWindow.Current.Name.Contains("Commit", StringComparison.OrdinalIgnoreCase)) return;
+
+            Console.WriteLine("\n--- Potential Commit Dialog Found by Event ---");
+
+            // Use existing logic to find the specific message box control
+            if (_injector.TryFindMessageBox(openedWindow, out var messageBox) && messageBox != null)
+            {
+                // We found it! Process it asynchronously to avoid blocking the UI event handler thread.
+                await ProcessCommitDialog(openedWindow, messageBox);
+            }
+        }
+        catch (ElementNotAvailableException)
+        {
+            // The window might have closed very quickly, which is fine.
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error in event handler: {ex.Message}");
+        }
+    }
+
+    private async Task ProcessCommitDialog(AutomationElement commitDialog, AutomationElement messageBox)
+    {
+        string? existingText = _injector.GetCommitMessage(messageBox);
+        if (existingText == null) return;
+
+        _injector.SetCommitMessage(messageBox, "Generating commit message... [Detecting repository]");
+        string? repoRoot = RepoFinder.FindRepoRootFromDialog(commitDialog);
+
+        if (string.IsNullOrEmpty(repoRoot))
+        {
+            _injector.SetCommitMessage(messageBox, "Error: Could not determine Git repository root.");
+            return;
+        }
+
+        _injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
+        string gitContext = await GitDiffHelper.GetDiffAsync(repoRoot);
+        string prompt;
+
+        if (gitContext.StartsWith("Error:"))
+        {
+            _injector.SetCommitMessage(messageBox, gitContext);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(gitContext))
+        {
+            if (!string.IsNullOrWhiteSpace(existingText))
+            {
+                prompt = "You are an automated tool that rewrites Git commit messages to follow the conventional commit standard. " +
+                         "Take the user's draft and output a complete, industry-standard commit message. " +
+                         "Your response MUST be only the raw commit message. DO NOT use placeholders like '[Insert Issue Number/ID]'. DO NOT add any commentary or explanation.\n\n" +
+                         $"User's draft: '{existingText}'";
+            }
+            else
+            {
+                prompt = "You are an automated tool that generates Git commit messages. " +
+                         "Generate a complete and usable conventional commit message for a minor, unspecified change. Example: 'chore: Minor code cleanup'. " +
+                         "Your response MUST be only the raw commit message. DO NOT use placeholders or provide any explanation.";
+            }
+        }
+        else
+        {
+            prompt = "You are an expert git commit message generation tool. " +
+                     "Based on the following git context (recent commits, changed files, and full diff), create a concise, conventional commit message. " +
+                     "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
+                     "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
+                     "Git Context:\n" +
+                     "```\n" +
+                     $"{gitContext}\n" +
+                     "```";
+        }
+
+        Console.WriteLine("--- Sending Request to Gemini ---");
+        Console.WriteLine($"[Existing Text]: {existingText}");
+        Console.WriteLine($"[Git Context Length]: {gitContext.Length} characters");
+        Console.WriteLine($"[Generated Prompt]:\n{prompt}");
+        Console.WriteLine("---------------------------------");
+
+        string finalMessage = await GeminiApiClient.GenerateCommitMessageAsync(prompt);
+
+        if (finalMessage.Contains("[") && (finalMessage.Contains("Insert") || finalMessage.Contains("Issue") || finalMessage.Contains("Your ")))
+        {
+            Console.WriteLine("!!! WARNING: AI returned a template. Falling back to a default message. !!!");
+            finalMessage = "chore: Minor update";
+        }
+
+        _injector.SetCommitMessage(messageBox, finalMessage.Trim());
+
+        Console.WriteLine($"Message set. Waiting for next event...");
+    }
+
+    public void Dispose()
+    {
+        Automation.RemoveAutomationEventHandler(WindowPattern.WindowOpenedEvent, AutomationElement.RootElement, _windowOpenedHandler);
+        GC.SuppressFinalize(this);
+    }
+}
+#endregion
+
+
+public class Program
+{
+    [STAThread]
     public static void Main(string[] args)
     {
-        var appThread = new Thread(ApplicationLoop);
-        appThread.SetApartmentState(ApartmentState.STA);
-        appThread.Start();
-        appThread.Join();
+        var injector = new TortoiseGitInjector();
+        using var watcher = new CommitDialogWatcher(injector);
+
+        watcher.Start();
+
+        Console.WriteLine("Monitoring is active. Press Enter to exit.");
+        Console.ReadLine();
     }
 }
