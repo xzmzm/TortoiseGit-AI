@@ -21,18 +21,34 @@ using System.Windows.Forms;
 internal static class NativeMethods
 {
     [DllImport("user32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-    public const uint WM_PASTE = 0x0302;
-    public const uint SCI_SELECTALL = 2013;
+    internal static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    internal const uint WmPaste = 0x0302;
+    internal const uint SciSelectAll = 2013;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern IntPtr OpenThread(ThreadAccess dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern uint SuspendThread(IntPtr hThread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern int ResumeThread(IntPtr hThread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool CloseHandle(IntPtr hObject);
+
+    [Flags]
+    internal enum ThreadAccess : int { SuspendResume = 0x0002 }
 }
 
 public class TortoiseGitInjector
 {
-    private const string COMMIT_TEXTBOX_CLASS_NAME = "Scintilla";
+    private const string CommitTextboxClassName = "Scintilla";
 
     public bool TryFindMessageBox(AutomationElement commitDialog, out AutomationElement? messageBox)
     {
-        var textCondition = new PropertyCondition(AutomationElement.ClassNameProperty, COMMIT_TEXTBOX_CLASS_NAME);
+        var textCondition = new PropertyCondition(AutomationElement.ClassNameProperty, CommitTextboxClassName);
         messageBox = commitDialog.FindFirst(TreeScope.Descendants, textCondition);
         return messageBox != null;
     }
@@ -73,10 +89,10 @@ public class TortoiseGitInjector
             {
                 var hwnd = new IntPtr(nativeHandle);
                 // These operations are now safely on an STA thread.
-                NativeMethods.SendMessage(hwnd, NativeMethods.SCI_SELECTALL, IntPtr.Zero, IntPtr.Zero);
+                NativeMethods.SendMessage(hwnd, NativeMethods.SciSelectAll, IntPtr.Zero, IntPtr.Zero);
                 originalClipboardData = Clipboard.GetDataObject();
                 Clipboard.SetText(text);
-                NativeMethods.SendMessage(hwnd, NativeMethods.WM_PASTE, IntPtr.Zero, IntPtr.Zero);
+                NativeMethods.SendMessage(hwnd, NativeMethods.WmPaste, IntPtr.Zero, IntPtr.Zero);
                 success = true;
             }
             catch (Exception ex)
@@ -106,10 +122,10 @@ public class TortoiseGitInjector
 #region Gemini API Client
 public static class GeminiApiClient
 {
-    private static readonly HttpClient _httpClient = new HttpClient();
+    private static readonly HttpClient httpClient = new HttpClient();
     private const string ApiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent";
 
-    static GeminiApiClient() { _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json")); }
+    static GeminiApiClient() { httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json")); }
 
     public static async Task<string> GenerateCommitMessageAsync(string prompt)
     {
@@ -121,7 +137,7 @@ public static class GeminiApiClient
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}?key={apiKey}");
             request.Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-            HttpResponseMessage response = await _httpClient.SendAsync(request);
+            HttpResponseMessage response = await httpClient.SendAsync(request);
             if (!response.IsSuccessStatusCode)
             {
                 string errorContent = await response.Content.ReadAsStringAsync();
@@ -182,7 +198,10 @@ public static class GitDiffHelper
     {
         try
         {
-            var (statusOutput, statusError, statusExitCode) = await RunGitCommandAsync("status --short", workingDirectory);
+            // Appending ' .' scopes the commands to the current working directory.
+            // This is crucial for when a commit is initiated from a subdirectory,
+            // ensuring we only get the diff for files within that scope, matching TortoiseGit's behavior.
+            var (statusOutput, statusError, statusExitCode) = await RunGitCommandAsync("status --short .", workingDirectory);
             if (statusExitCode != 0)
             {
                 Console.WriteLine($"Warning: 'git status' command failed with exit code {statusExitCode}:\n{statusError}");
@@ -210,11 +229,11 @@ public static class GitDiffHelper
 
             fullContext.AppendLine("Full diff:");
 
-            var (diffOutput, diffError, diffExitCode) = await RunGitCommandAsync("diff HEAD", workingDirectory);
+            var (diffOutput, diffError, diffExitCode) = await RunGitCommandAsync("diff HEAD .", workingDirectory);
             if (diffExitCode != 0) return $"Error: 'git diff HEAD' failed.\n{diffError}";
             if (!string.IsNullOrWhiteSpace(diffOutput)) fullContext.AppendLine(diffOutput);
 
-            var (cachedDiffOutput, cachedDiffError, cachedDiffExitCode) = await RunGitCommandAsync("diff --cached HEAD", workingDirectory);
+            var (cachedDiffOutput, cachedDiffError, cachedDiffExitCode) = await RunGitCommandAsync("diff --cached HEAD .", workingDirectory);
             if (cachedDiffExitCode != 0) return $"Error: 'git diff --cached HEAD' failed.\n{cachedDiffError}";
             if (!string.IsNullOrWhiteSpace(cachedDiffOutput)) fullContext.AppendLine(cachedDiffOutput);
 
@@ -297,34 +316,34 @@ public static class RepoFinder
 #region Event-Driven Watcher
 public class CommitDialogWatcher : IDisposable
 {
-    private readonly TortoiseGitInjector _injector;
-    private readonly AutomationEventHandler _windowOpenedHandler;
-    private readonly HashSet<int> _tgitProcessIds = new HashSet<int>();
+    private readonly TortoiseGitInjector injector;
+    private readonly AutomationEventHandler windowOpenedHandler;
+    private readonly HashSet<int> tgitProcessIds = new HashSet<int>();
 
     public CommitDialogWatcher(TortoiseGitInjector injector)
     {
-        _injector = injector;
+        this.injector = injector;
         // The handler delegate is stored in a field to prevent it from being garbage collected
-        _windowOpenedHandler = OnWindowOpened;
+        this.windowOpenedHandler = this.OnWindowOpened;
     }
 
     public void Start()
     {
         Console.WriteLine("Starting event-driven monitoring for TortoiseGit commit dialog...");
-        UpdateTgitProcessList();
+        this.UpdateTgitProcessList();
         Automation.AddAutomationEventHandler(
             WindowPattern.WindowOpenedEvent,
             AutomationElement.RootElement,
             TreeScope.Children,
-            _windowOpenedHandler);
+            this.windowOpenedHandler);
     }
 
     private void UpdateTgitProcessList()
     {
-        _tgitProcessIds.Clear();
+        this.tgitProcessIds.Clear();
         foreach (var p in Process.GetProcessesByName("TortoiseGitProc"))
         {
-            _tgitProcessIds.Add(p.Id);
+            this.tgitProcessIds.Add(p.Id);
         }
     }
 
@@ -335,19 +354,18 @@ public class CommitDialogWatcher : IDisposable
         try
         {
             // Refresh the process list in case TortoiseGitProc just started with this dialog
-            UpdateTgitProcessList();
+            this.UpdateTgitProcessList();
 
             // Quick filters to ignore irrelevant windows
-            if (!_tgitProcessIds.Contains(openedWindow.Current.ProcessId)) return;
+            if (!this.tgitProcessIds.Contains(openedWindow.Current.ProcessId)) return;
             if (!openedWindow.Current.Name.Contains("Commit", StringComparison.OrdinalIgnoreCase)) return;
 
             Console.WriteLine("\n--- Potential Commit Dialog Found by Event ---");
 
-            // Use existing logic to find the specific message box control
-            if (_injector.TryFindMessageBox(openedWindow, out var messageBox) && messageBox != null)
+            if (this.injector.TryFindMessageBox(openedWindow, out var messageBox) && messageBox != null)
             {
                 // We found it! Process it asynchronously to avoid blocking the UI event handler thread.
-                await ProcessCommitDialog(openedWindow, messageBox);
+                await this.ProcessCommitDialog(openedWindow, messageBox);
             }
         }
         catch (ElementNotAvailableException)
@@ -362,55 +380,42 @@ public class CommitDialogWatcher : IDisposable
 
     private async Task ProcessCommitDialog(AutomationElement commitDialog, AutomationElement messageBox)
     {
-        string? existingText = _injector.GetCommitMessage(messageBox);
+        string? existingText = this.injector.GetCommitMessage(messageBox);
         if (existingText == null) return;
 
-        _injector.SetCommitMessage(messageBox, "Generating commit message... [Detecting repository]");
+        this.injector.SetCommitMessage(messageBox, "Generating commit message... [Detecting repository]");
         string? repoRoot = RepoFinder.FindRepoRootFromDialog(commitDialog);
 
         if (string.IsNullOrEmpty(repoRoot))
         {
-            _injector.SetCommitMessage(messageBox, "Error: Could not determine Git repository root.");
+            this.injector.SetCommitMessage(messageBox, "Error: Could not determine Git repository root.");
             return;
         }
 
-        _injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
+        this.injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
         string gitContext = await GitDiffHelper.GetDiffAsync(repoRoot);
-        string prompt;
 
         if (gitContext.StartsWith("Error:"))
         {
-            _injector.SetCommitMessage(messageBox, gitContext);
+            this.injector.SetCommitMessage(messageBox, gitContext);
             return;
         }
 
         if (string.IsNullOrWhiteSpace(gitContext))
         {
-            if (!string.IsNullOrWhiteSpace(existingText))
-            {
-                prompt = "You are an automated tool that rewrites Git commit messages to follow the conventional commit standard. " +
-                         "Take the user's draft and output a complete, industry-standard commit message. " +
-                         "Your response MUST be only the raw commit message. DO NOT use placeholders like '[Insert Issue Number/ID]'. DO NOT add any commentary or explanation.\n\n" +
-                         $"User's draft: '{existingText}'";
-            }
-            else
-            {
-                prompt = "You are an automated tool that generates Git commit messages. " +
-                         "Generate a complete and usable conventional commit message for a minor, unspecified change. Example: 'chore: Minor code cleanup'. " +
-                         "Your response MUST be only the raw commit message. DO NOT use placeholders or provide any explanation.";
-            }
+            this.injector.SetCommitMessage(messageBox, "No changes detected to commit.");
+            Console.WriteLine("No changes detected. Aborting AI generation.");
+            return;
         }
-        else
-        {
-            prompt = "You are an expert git commit message generation tool. " +
-                     "Based on the following git context (recent commits, changed files, and full diff), create a concise, conventional commit message. " +
-                     "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
-                     "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
-                     "Git Context:\n" +
-                     "```\n" +
-                     $"{gitContext}\n" +
-                     "```";
-        }
+
+        string prompt = "You are an expert git commit message generation tool. " +
+                 "Based on the following git context (recent commits, changed files, and full diff), create a concise, conventional commit message. " +
+                 "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
+                 "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
+                 "Git Context:\n" +
+                 "```\n" +
+                 $"{gitContext}\n" +
+                 "```";
 
         Console.WriteLine("--- Sending Request to Gemini ---");
         Console.WriteLine($"[Existing Text]: {existingText}");
@@ -418,7 +423,46 @@ public class CommitDialogWatcher : IDisposable
         Console.WriteLine($"[Generated Prompt]:\n{prompt}");
         Console.WriteLine("---------------------------------");
 
-        string finalMessage = await GeminiApiClient.GenerateCommitMessageAsync(prompt);
+        string initialMessage = "Generating AI commit message...";
+        this.injector.SetCommitMessage(messageBox, initialMessage);
+        var stopwatch = Stopwatch.StartNew();
+
+        var apiTask = GeminiApiClient.GenerateCommitMessageAsync(prompt);
+
+        while (!apiTask.IsCompleted)
+        {
+            await Task.WhenAny(apiTask, Task.Delay(1000));
+            if (apiTask.IsCompleted) break;
+
+            try
+            {
+                var elapsedSeconds = (int)Math.Round(stopwatch.Elapsed.TotalSeconds);
+                if (elapsedSeconds > 0)
+                {
+                    this.injector.SetCommitMessage(messageBox, $"{initialMessage} ({elapsedSeconds}s)");
+                }
+            }
+            catch (ElementNotAvailableException)
+            {
+                Console.WriteLine("Commit dialog closed while generating message. Aborting.");
+                stopwatch.Stop();
+                return;
+            }
+        }
+
+        stopwatch.Stop();
+        string finalMessage = await apiTask;
+
+        try
+        {
+            // Re-check if element is available before setting final message.
+            _ = messageBox.Current.Name;
+        }
+        catch (ElementNotAvailableException)
+        {
+            Console.WriteLine("Commit dialog closed before setting final message.");
+            return;
+        }
 
         if (finalMessage.Contains("[") && (finalMessage.Contains("Insert") || finalMessage.Contains("Issue") || finalMessage.Contains("Your ")))
         {
@@ -426,14 +470,230 @@ public class CommitDialogWatcher : IDisposable
             finalMessage = "chore: Minor update";
         }
 
-        _injector.SetCommitMessage(messageBox, finalMessage.Trim());
+        this.injector.SetCommitMessage(messageBox, finalMessage.Trim());
 
         Console.WriteLine($"Message set. Waiting for next event...");
     }
 
     public void Dispose()
     {
-        Automation.RemoveAutomationEventHandler(WindowPattern.WindowOpenedEvent, AutomationElement.RootElement, _windowOpenedHandler);
+        Automation.RemoveAutomationEventHandler(WindowPattern.WindowOpenedEvent, AutomationElement.RootElement, this.windowOpenedHandler);
+        GC.SuppressFinalize(this);
+    }
+}
+#endregion
+
+#region Process Creation Watcher
+public class ProcessCreationWatcher : IDisposable
+{
+    private readonly ManagementEventWatcher watcher;
+    private const string ProcessName = "TortoiseGitProc.exe";
+
+    public ProcessCreationWatcher()
+    {
+        string query = $"SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process' AND TargetInstance.Name = '{ProcessName}'";
+        this.watcher = new ManagementEventWatcher(new WqlEventQuery(query));
+        this.watcher.EventArrived += this.OnProcessStarted;
+    }
+
+    public void Start()
+    {
+        Console.WriteLine($"Starting to watch for {ProcessName} launches to report arguments...");
+        this.watcher.Start();
+    }
+
+    public void Stop()
+    {
+        this.watcher.Stop();
+    }
+
+    private void OnProcessStarted(object sender, EventArrivedEventArgs e)
+    {
+        try
+        {
+            if (e.NewEvent["TargetInstance"] is not ManagementBaseObject targetInstance) { return; }
+
+            var commandLineObj = targetInstance["CommandLine"];
+            if (commandLineObj is not string commandLine || string.IsNullOrEmpty(commandLine)) { return; }
+
+            var processId = (uint)targetInstance["ProcessId"];
+
+            Console.WriteLine("\n--- TortoiseGitProc Launched ---");
+            Console.WriteLine($"Process ID:   {processId}");
+            Console.WriteLine($"Command Line: {commandLine}");
+
+            var pathFileMatch = Regex.Match(commandLine, @"/pathfile:""([^""]+)""");
+            if (pathFileMatch.Success)
+            {
+                string pathFile = pathFileMatch.Groups[1].Value;
+                Console.WriteLine($"-> Found pathfile: {pathFile}");
+
+                List<IntPtr> threadHandles = null;
+                try
+                {
+                    // Suspend the process to prevent it from deleting the file
+                    threadHandles = this.SuspendProcess((int)processId);
+                    if (threadHandles.Count == 0)
+                    {
+                        Console.WriteLine("-> Could not suspend process; it may have exited too quickly.");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"-> Process {processId} suspended with {threadHandles.Count} threads.");
+
+                        // Give a tiny moment for the file system to catch up, just in case.
+                        Thread.Sleep(50);
+
+                        if (File.Exists(pathFile))
+                        {
+                            var fileContent = File.ReadAllText(pathFile, Encoding.UTF8);
+                            Console.WriteLine("--- Pathfile Content ---");
+                            Console.WriteLine(fileContent);
+                            Console.WriteLine("------------------------");
+                        }
+                        else
+                        {
+                            Console.WriteLine("-> Pathfile was not found after suspending the process.");
+                        }
+                    }
+                }
+                finally
+                {
+                    if (threadHandles != null && threadHandles.Count > 0)
+                    {
+                        this.ResumeProcess(threadHandles);
+                        Console.WriteLine($"-> Process {processId} resumed.");
+                    }
+                }
+            }
+
+            Console.WriteLine("--------------------------------\n");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error processing process start event: {ex.Message}");
+        }
+    }
+
+    private List<IntPtr> SuspendProcess(int processId)
+    {
+        var threadHandles = new List<IntPtr>();
+        try
+        {
+            var process = Process.GetProcessById(processId);
+            foreach (ProcessThread pT in process.Threads)
+            {
+                IntPtr pOpenThread = NativeMethods.OpenThread(NativeMethods.ThreadAccess.SuspendResume, false, (uint)pT.Id);
+                if (pOpenThread != IntPtr.Zero)
+                {
+                    NativeMethods.SuspendThread(pOpenThread);
+                    threadHandles.Add(pOpenThread);
+                }
+            }
+        }
+        catch (ArgumentException)
+        {
+            // Process may have already exited
+            Console.WriteLine($"-> Process {processId} exited before it could be suspended.");
+            foreach (var handle in threadHandles) { NativeMethods.CloseHandle(handle); }
+            return new List<IntPtr>();
+        }
+        return threadHandles;
+    }
+
+    private void ResumeProcess(List<IntPtr> threadHandles)
+    {
+        foreach (var handle in threadHandles)
+        {
+            NativeMethods.ResumeThread(handle);
+            NativeMethods.CloseHandle(handle);
+        }
+    }
+
+    public void Dispose()
+    {
+        this.Stop();
+        this.watcher.Dispose();
+        GC.SuppressFinalize(this);
+    }
+}
+#endregion
+
+#region Temp File Watcher
+public class TempFileWatcher : IDisposable
+{
+    private readonly FileSystemWatcher fileWatcher;
+    private readonly string watchPath;
+
+    public TempFileWatcher()
+    {
+        this.watchPath = Path.Combine(Path.GetTempPath(), "tortoisegit");
+        try
+        {
+            if (!Directory.Exists(this.watchPath))
+            {
+                Console.WriteLine($"Creating monitored directory: {this.watchPath}");
+                Directory.CreateDirectory(this.watchPath);
+            }
+
+            this.fileWatcher = new FileSystemWatcher(this.watchPath)
+            {
+                NotifyFilter = NotifyFilters.FileName, // Just need to know when a file is created.
+                IncludeSubdirectories = false
+            };
+            this.fileWatcher.Created += this.OnFileCreated;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"FATAL: Could not initialize TempFileWatcher for path '{this.watchPath}'. Error: {ex.Message}");
+            this.fileWatcher = null; // Ensure watcher is null so Start() doesn't throw.
+        }
+    }
+
+    public void Start()
+    {
+        if (this.fileWatcher == null) return;
+        Console.WriteLine($"Watching for temp files in: {this.watchPath}");
+        this.fileWatcher.EnableRaisingEvents = true;
+    }
+
+    public void Stop()
+    {
+        if (this.fileWatcher != null)
+        {
+            this.fileWatcher.EnableRaisingEvents = false;
+        }
+    }
+
+    private void OnFileCreated(object sender, FileSystemEventArgs e)
+    {
+        Console.WriteLine($"\n--- Temp File Detected: {e.Name} ---");
+        // Use a small, quick retry loop to handle the race condition where the file is created but not yet written/unlocked.
+        for (int i = 0; i < 5; i++)
+        {
+            try
+            {
+                // A small delay on the first try can be effective as the create event may fire before the write completes.
+                if (i == 0) Thread.Sleep(10);
+
+                string content = File.ReadAllText(e.FullPath, Encoding.UTF8);
+                Console.WriteLine("--- Pathfile Content (from FileSystemWatcher) ---");
+                Console.WriteLine(content);
+                Console.WriteLine("-------------------------------------------------");
+                return; // Success, exit the method.
+            }
+            catch (FileNotFoundException) { Console.WriteLine("-> File disappeared before it could be read."); break; }
+            catch (IOException) { if (i < 4) Thread.Sleep(20); } // File is likely locked. Wait and try again.
+            catch (Exception ex) { Console.WriteLine($"-> An unexpected error occurred while reading temp file: {ex.Message}"); break; }
+        }
+        Console.WriteLine("-> Could not read file content after multiple attempts.");
+        Console.WriteLine("---------------------------------------\n");
+    }
+
+    public void Dispose()
+    {
+        this.Stop();
+        this.fileWatcher?.Dispose();
         GC.SuppressFinalize(this);
     }
 }
@@ -445,6 +705,12 @@ public class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        using var processWatcher = new ProcessCreationWatcher();
+        processWatcher.Start();
+
+        using var tempFileWatcher = new TempFileWatcher();
+        tempFileWatcher.Start();
+
         var injector = new TortoiseGitInjector();
         using var watcher = new CommitDialogWatcher(injector);
 
