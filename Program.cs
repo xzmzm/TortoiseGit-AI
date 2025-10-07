@@ -229,13 +229,45 @@ public static class GitDiffHelper
 
             fullContext.AppendLine("Full diff:");
 
+            const int MaxDiffBytes = 30 * 1024; // 30KB
+
             var (diffOutput, diffError, diffExitCode) = await RunGitCommandAsync("diff HEAD .", workingDirectory);
             if (diffExitCode != 0) return $"Error: 'git diff HEAD' failed.\n{diffError}";
-            if (!string.IsNullOrWhiteSpace(diffOutput)) fullContext.AppendLine(diffOutput);
 
             var (cachedDiffOutput, cachedDiffError, cachedDiffExitCode) = await RunGitCommandAsync("diff --cached HEAD .", workingDirectory);
             if (cachedDiffExitCode != 0) return $"Error: 'git diff --cached HEAD' failed.\n{cachedDiffError}";
-            if (!string.IsNullOrWhiteSpace(cachedDiffOutput)) fullContext.AppendLine(cachedDiffOutput);
+
+            var combinedDiffBuilder = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(diffOutput)) combinedDiffBuilder.AppendLine(diffOutput);
+            if (!string.IsNullOrWhiteSpace(cachedDiffOutput)) combinedDiffBuilder.AppendLine(cachedDiffOutput);
+            string combinedDiff = combinedDiffBuilder.ToString().TrimEnd();
+
+            if (string.IsNullOrWhiteSpace(combinedDiff))
+            {
+                // No diff content to add
+            }
+            else if (Encoding.UTF8.GetByteCount(combinedDiff) > MaxDiffBytes)
+            {
+                Console.WriteLine($"Warning: Diff is larger than {MaxDiffBytes / 1024}KB, truncating for prompt.");
+
+                // Start with a proportional guess to make the loop faster
+                int len = (int)(combinedDiff.Length * ((double)MaxDiffBytes / Encoding.UTF8.GetByteCount(combinedDiff)));
+
+                // Reduce length until it's safely under the byte limit
+                while (Encoding.UTF8.GetByteCount(combinedDiff.Substring(0, len)) > MaxDiffBytes) { len--; }
+
+                // Find last newline to avoid cutting a line
+                int cutIndex = combinedDiff.LastIndexOf('\n', len > 0 ? len - 1 : 0);
+                if (cutIndex <= 0) cutIndex = len;
+
+                string truncatedDiff = combinedDiff.Substring(0, cutIndex);
+                fullContext.AppendLine(truncatedDiff);
+                fullContext.AppendLine("\n[... Diff truncated due to size ...]");
+            }
+            else
+            {
+                fullContext.AppendLine(combinedDiff);
+            }
 
             return fullContext.ToString();
         }
