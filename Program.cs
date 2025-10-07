@@ -248,46 +248,45 @@ public static class GitDiffHelper
             }
             else if (Encoding.UTF8.GetByteCount(combinedDiff) > MaxDiffBytes)
             {
-                Console.WriteLine($"Warning: Diff is larger than {MaxDiffBytes / 1024}KB, truncating file-by-file for prompt.");
+                Console.WriteLine($"Warning: Total diff is large. Truncating individual files that exceed {MaxDiffBytes / 1024}KB.");
 
+                var processedDiffs = new StringBuilder();
                 // Split the combined diff into diffs for individual files.
                 // The pattern splits on a newline that is followed by "diff --git ".
                 string[] fileDiffs = Regex.Split(combinedDiff, @"\r?\n(?=diff --git )");
 
-                var truncatedDiffBuilder = new StringBuilder();
-                int currentBytes = 0;
-                int filesIncluded = 0;
-                byte[] newlineBytes = Encoding.UTF8.GetBytes(Environment.NewLine);
-
-                foreach (string fileDiff in fileDiffs)
+                for (int i = 0; i < fileDiffs.Length; i++)
                 {
+                    string fileDiff = fileDiffs[i];
                     if (string.IsNullOrWhiteSpace(fileDiff)) continue;
 
-                    int fileDiffBytes = Encoding.UTF8.GetByteCount(fileDiff);
-                    int separatorBytes = filesIncluded > 0 ? newlineBytes.Length : 0;
+                    // Re-add the newline separator that was consumed by the split regex.
+                    if (i > 0) processedDiffs.AppendLine();
 
-                    // Always include at least one file's diff, even if it's over the limit.
-                    if (filesIncluded > 0 && currentBytes + separatorBytes + fileDiffBytes > MaxDiffBytes)
+                    if (Encoding.UTF8.GetByteCount(fileDiff) > MaxDiffBytes)
                     {
-                        break;
-                    }
+                        string marker = "\n[... diff for this file truncated due to size ...]";
+                        long textBudget = MaxDiffBytes - Encoding.UTF8.GetByteCount(marker);
+                        if (textBudget < 0) textBudget = 0;
 
-                    if (filesIncluded > 0)
+                        // Start with a proportional guess to make the loop faster
+                        int len = (int)(fileDiff.Length * ((double)textBudget / Encoding.UTF8.GetByteCount(fileDiff)));
+                        // Reduce length until it's safely under the byte limit
+                        while (len > 0 && Encoding.UTF8.GetByteCount(fileDiff.Substring(0, len)) > textBudget) { len--; }
+
+                        // Find last newline to avoid cutting a line
+                        int cutIndex = fileDiff.LastIndexOf('\n', len > 0 ? len - 1 : 0);
+                        if (cutIndex <= 0) cutIndex = len;
+
+                        processedDiffs.Append(fileDiff.Substring(0, cutIndex));
+                        processedDiffs.Append(marker);
+                    }
+                    else
                     {
-                        truncatedDiffBuilder.AppendLine();
+                        processedDiffs.Append(fileDiff);
                     }
-                    truncatedDiffBuilder.Append(fileDiff);
-                    currentBytes += separatorBytes + fileDiffBytes;
-                    filesIncluded++;
                 }
-
-                fullContext.AppendLine(truncatedDiffBuilder.ToString());
-
-                int totalFiles = fileDiffs.Count(s => !string.IsNullOrWhiteSpace(s));
-                if (filesIncluded < totalFiles)
-                {
-                    fullContext.AppendLine($"\n[... Diff for {totalFiles - filesIncluded} more file(s) truncated due to size ...]");
-                }
+                fullContext.AppendLine(processedDiffs.ToString());
             }
             else
             {
