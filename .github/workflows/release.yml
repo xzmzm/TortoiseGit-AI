@@ -48,7 +48,9 @@ jobs:
       - name: Sign executables
         # This step only runs on tag pushes where the signing secrets are available.
         # It signs the executables to prevent Windows SmartScreen warnings.
-        if: ${{ github.ref_type == 'tag' && secrets.CODE_SIGNING_CERTIFICATE_BASE64 != '1' }}
+        env:
+          CAN_SIGN: ${{ secrets.CODE_SIGNING_CERTIFICATE_BASE64 != '' && secrets.CODE_SIGNING_CERTIFICATE_BASE64 != '1' }}
+        if: github.ref_type == 'tag' && env.CAN_SIGN == 'true'
         shell: pwsh
         run: |
           $pfxFilePath = Join-Path $env:TEMP "cert.pfx"
