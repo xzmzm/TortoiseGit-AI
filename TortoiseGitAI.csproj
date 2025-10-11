@@ -2,17 +2,32 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <TargetFrameworks>net9.0-windows;net472</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;x64</Platforms>
-	  <!-- Make sure this line is present -->
-	  <UseWindowsForms>true</UseWindowsForms>
+   <!-- Make sure this line is present -->
+   <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
-	<ItemGroup>
-		<FrameworkReference Include="Microsoft.WindowsDesktop.App" />
-	</ItemGroup>
-	<ItemGroup>
-	  <PackageReference Include="System.Management" Version="9.0.9" />
-	</ItemGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net472'">
+   <ImplicitUsings>disable</ImplicitUsings>
+   <Nullable>annotations</Nullable>
+   <LangVersion>9.0</LangVersion>
+ </PropertyGroup>
+
+ <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows'">
+  <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+ </ItemGroup>
+ <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+    <PackageReference Include="System.Net.Http" Version="4.3.4" />
+    <PackageReference Include="System.Text.Json" Version="4.7.2" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="UIAutomationClient" />
+    <Reference Include="UIAutomationTypes" />
+  </ItemGroup>
+ <ItemGroup>
+   <PackageReference Include="System.Management" Version="9.0.9" />
+ </ItemGroup>
 </Project>

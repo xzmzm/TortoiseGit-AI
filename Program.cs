@@ -151,11 +151,15 @@ public static class GeminiApiClient
     }
 }
 
-public class GeminiRequest { [JsonPropertyName("contents")] public Content[] Contents { get; set; } }
+public class GeminiRequest { [JsonPropertyName("contents")] public Content[]? Contents { get; set; } }
 public class GeminiResponse { [JsonPropertyName("candidates")] public Candidate[]? Candidates { get; set; } }
 public class Candidate { [JsonPropertyName("content")] public Content? Content { get; set; } }
 public class Content { [JsonPropertyName("parts")] public Part[]? Parts { get; set; } }
+#if NET472
 public class Part { [JsonPropertyName("text")] public string Text { get; set; } }
+#else
+public class Part { [JsonPropertyName("text")] public required string Text { get; set; } }
+#endif
 #endregion
 
 #region Git & Repo Helpers
@@ -189,7 +193,12 @@ public static class GitDiffHelper
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
+#if NET472
+        process.WaitForExit();
+        await Task.CompletedTask; // Since this is an async method, we need to return a Task.
+#else
         await process.WaitForExitAsync();
+#endif
 
         return (outputBuilder.ToString().TrimEnd(), errorBuilder.ToString().TrimEnd(), process.ExitCode);
     }
@@ -414,7 +423,11 @@ public class CommitDialogWatcher : IDisposable
 
             // Quick filters to ignore irrelevant windows
             if (!this.tgitProcessIds.Contains(openedWindow.Current.ProcessId)) return;
+#if NET472
+            if (openedWindow.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) == -1) return;
+#else
             if (!openedWindow.Current.Name.Contains("Commit", StringComparison.OrdinalIgnoreCase)) return;
+#endif
 
             Console.WriteLine("\n--- Potential Commit Dialog Found by Event ---");
 
@@ -584,7 +597,7 @@ public class ProcessCreationWatcher : IDisposable
                 string pathFile = pathFileMatch.Groups[1].Value;
                 Console.WriteLine($"-> Found pathfile: {pathFile}");
 
-                List<IntPtr> threadHandles = null;
+                List<IntPtr> threadHandles = new List<IntPtr>();
                 try
                 {
                     // Suspend the process to prevent it from deleting the file
@@ -678,7 +691,7 @@ public class ProcessCreationWatcher : IDisposable
 #region Temp File Watcher
 public class TempFileWatcher : IDisposable
 {
-    private readonly FileSystemWatcher fileWatcher;
+    private readonly FileSystemWatcher? fileWatcher;
     private readonly string watchPath;
 
     public TempFileWatcher()
