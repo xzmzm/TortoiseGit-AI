@@ -33,18 +33,17 @@ jobs:
       - name: Build net472
         run: dotnet build TortoiseGitAI.csproj --configuration Release --framework net472
 
-      - name: Sign executables with Sigstore
-        # This step only runs on tag pushes. It uses the free sigstore service
-        # to sign the executables, which helps establish trust and can mitigate
-        # Windows SmartScreen warnings over time.
+      - name: Install Cosign
         if: startsWith(github.ref, 'refs/tags/v')
         uses: sigstore/cosign-installer@v3.5.0
 
-      - name: Sign executables with Sigstore
+      - name: Sign files with Sigstore
+        # This step only runs on tag pushes. It uses the free sigstore service
+        # to sign the executable files, which registers them in a public transparency log.
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          cosign sign --yes bin/Release/net472/TortoiseGitAI.exe
-          cosign sign --yes bin/Release/net9.0-windows/TortoiseGitAI.exe
+          cosign sign-blob --yes bin/Release/net472/TortoiseGitAI.exe
+          cosign sign-blob --yes bin/Release/net9.0-windows/TortoiseGitAI.exe
 
       - name: Sign executables with Certificate
         # This step only runs on tag pushes where the signing secrets are available.
