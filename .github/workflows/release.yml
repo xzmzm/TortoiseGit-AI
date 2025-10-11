@@ -35,20 +35,17 @@ jobs:
       - name: Zip net9.0-windows build
         run: Compress-Archive -Path ${{github.workspace}}/publish/net9.0-windows/* -DestinationPath ${{github.workspace}}/publish/TortoiseGitAI-net9.0-windows.zip
 
-      - name: Publish net472
-        run: dotnet publish TortoiseGitAI.csproj --configuration Release --framework net472 --no-build --output ${{github.workspace}}/publish/net472
-
       - name: Upload net9.0-windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: TortoiseGitAI-net9.0-windows
           path: ${{github.workspace}}/publish/TortoiseGitAI-net9.0-windows.zip
 
-      - name: Upload net472 artifact
+      - name: Upload net472 artifact (single file)
         uses: actions/upload-artifact@v4
         with:
           name: TortoiseGitAI-net472
-          path: ${{github.workspace}}/publish/net472
+          path: bin/Release/net472/TortoiseGitAI.exe
 
   release:
     needs: build
@@ -89,5 +86,5 @@ jobs:
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: artifacts/TortoiseGitAI-net472/TortoiseGitAI.exe
-          asset_name: TortoiseGitAI-net472.exe
+          asset_name: TortoiseGitAI-net472-${{ github.ref_name }}.exe
           asset_content_type: application/vnd.microsoft.portable-executable
