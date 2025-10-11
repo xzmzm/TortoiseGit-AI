@@ -29,6 +29,53 @@ jobs:
       - name: Build net472
         run: dotnet build TortoiseGitAI.csproj --configuration Release --framework net472
 
+      - name: Sign executables with Sigstore
+        # This step only runs on tag pushes. It uses the free sigstore service
+        # to sign the executables, which helps establish trust and can mitigate
+        # Windows SmartScreen warnings over time.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: sigstore/gh-action-sigstore-windows@v1.1.1
+        with:
+          # A comma-separated list of files to sign.
+          # We sign both the .NET Framework and .NET 9 executables.
+          inputs: |
+            bin/Release/net472/TortoiseGitAI.exe
+            bin/Release/net9.0-windows/TortoiseGitAI.exe
+          # Let sigstore use its own production instance.
+          fulcio-url: https://fulcio.sigstore.dev
+          oidc-client-id: sigstore
+
+      - name: Sign executables
+        # This step only runs on tag pushes where the signing secrets are available.
+        # It signs the executables to prevent Windows SmartScreen warnings.
+        if: startsWith(github.ref, 'refs/tags/v') && secrets.CODE_SIGNING_CERTIFICATE_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfxFilePath = Join-Path $env:TEMP "cert.pfx"
+          try {
+            [System.IO.File]::WriteAllBytes($pfxFilePath, [System.Convert]::FromBase64String("${{ secrets.CODE_SIGNING_CERTIFICATE_BASE64 }}"))
+
+            # Find the latest version of signtool.exe from the Windows SDK, preferring the x64 version.
+            $signtoolPath = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Filter "signtool.exe" -Recurse | Where-Object { $_.DirectoryName -like "*x64" } | Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1).FullName
+            if (-not ($signtoolPath -and (Test-Path $signtoolPath))) {
+              Write-Error "signtool.exe not found in Windows Kits 10 bin folder."
+              exit 1
+            }
+            Write-Host "Using SignTool at: $signtoolPath"
+
+            $filesToSign = @(
+              "bin/Release/net472/TortoiseGitAI.exe",
+              "bin/Release/net9.0-windows/TortoiseGitAI.exe"
+            )
+
+            foreach ($file in $filesToSign) {
+              Write-Host "Signing $file..."
+              & $signtoolPath sign /f $pfxFilePath /p "${{ secrets.CODE_SIGNING_CERTIFICATE_PASSWORD }}" /tr http://timestamp.digicert.com /td sha256 /fd sha256 $file
+            }
+          } finally {
+            if (Test-Path $pfxFilePath) { Remove-Item $pfxFilePath -Force }
+          }
+
       - name: Publish net9.0-windows
         run: dotnet publish TortoiseGitAI.csproj --configuration Release --framework net9.0-windows --no-build --output ${{github.workspace}}/publish/net9.0-windows
 
