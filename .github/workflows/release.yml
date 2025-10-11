@@ -12,6 +12,7 @@ jobs:
     runs-on: windows-latest
 
     permissions:
+      contents: read # Required to check out private repositories
       id-token: write # Required for Sigstore signing
 
     steps:
