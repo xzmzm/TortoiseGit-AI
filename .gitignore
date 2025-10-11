@@ -9,9 +9,15 @@
 [Oo]bj/
 [Pp]ublish/
 
+# C++ Build results
+/cpp/build/
+
 # Rider
 .idea/
 *.sln.iml
+
+# VS Code
+.vscode/
 
 # User-specific
 *.userprefs
