@@ -21,19 +21,19 @@ jobs:
           dotnet-version: 9.0.x
 
       - name: Restore dependencies
-        run: dotnet restore
+        run: dotnet restore TortoiseGitAI.sln
 
       - name: Build net9.0-windows
-        run: dotnet build --configuration Release --framework net9.0-windows
+        run: dotnet build TortoiseGitAI.csproj --configuration Release --framework net9.0-windows
 
       - name: Publish net9.0-windows
-        run: dotnet publish --configuration Release --framework net9.0-windows --no-build --output ${{github.workspace}}/publish/net9.0-windows
+        run: dotnet publish TortoiseGitAI.csproj --configuration Release --framework net9.0-windows --no-build --output ${{github.workspace}}/publish/net9.0-windows
 
       - name: Zip net9.0-windows build
         run: Compress-Archive -Path ${{github.workspace}}/publish/net9.0-windows/* -DestinationPath ${{github.workspace}}/publish/TortoiseGitAI-net9.0-windows.zip
 
-      - name: Build and Publish net472 with Fody/Costura
-        run: dotnet publish --configuration Release --framework net472 --no-build --output ${{github.workspace}}/publish/net472
+      - name: Build and Publish net472
+        run: dotnet publish TortoiseGitAI.csproj --configuration Release --framework net472 --output ${{github.workspace}}/publish/net472
 
       - name: Upload net9.0-windows artifact
         uses: actions/upload-artifact@v4
