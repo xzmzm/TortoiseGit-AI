@@ -12,22 +12,26 @@
 
   <PropertyGroup Condition="'$(TargetFramework)' == 'net472'">
    <ImplicitUsings>disable</ImplicitUsings>
-   <Nullable>annotations</Nullable>
-   <LangVersion>9.0</LangVersion>
- </PropertyGroup>
+   <Nullable>disable</Nullable>
+   <LangVersion>latest</LangVersion>
+  </PropertyGroup>
 
- <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows'">
-  <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+<ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows'">
+ <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+</ItemGroup>
+<ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+   <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+   <PackageReference Include="System.Net.Http" Version="4.3.4" />
+   <PackageReference Include="System.Text.Json" Version="4.7.2" />
+   <Reference Include="WindowsBase" />
+   <Reference Include="UIAutomationClient" />
+   <Reference Include="UIAutomationTypes" />
+  <PackageReference Include="Costura.Fody" Version="5.7.0">
+    <PrivateAssets>all</PrivateAssets>
+  </PackageReference>
  </ItemGroup>
- <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
-    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
-    <PackageReference Include="System.Net.Http" Version="4.3.4" />
-    <PackageReference Include="System.Text.Json" Version="4.7.2" />
-    <Reference Include="WindowsBase" />
-    <Reference Include="UIAutomationClient" />
-    <Reference Include="UIAutomationTypes" />
-  </ItemGroup>
- <ItemGroup>
-   <PackageReference Include="System.Management" Version="9.0.9" />
- </ItemGroup>
+<ItemGroup>
+ <PackageReference Include="System.Management" Version="8.0.0" />
+</ItemGroup>
 </Project>
+

@@ -1,4 +1,8 @@
-﻿using System;
+﻿#if NET472
+#pragma warning disable CS8632 // The annotation for nullable reference types should only be used in code within a '#nullable' annotations context.
+#endif
+
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -61,9 +65,6 @@ public class TortoiseGitInjector
 
     public bool SetCommitMessage(AutomationElement messageBox, string text)
     {
-        // AutomationElement must be used on the thread it was created on (UIA event thread, which is MTA).
-        // Clipboard operations must happen on an STA thread.
-        // So, we get the window handle here, then perform clipboard actions on a new STA thread.
         int nativeHandle;
         try
         {
@@ -155,11 +156,7 @@ public class GeminiRequest { [JsonPropertyName("contents")] public Content[]? Co
 public class GeminiResponse { [JsonPropertyName("candidates")] public Candidate[]? Candidates { get; set; } }
 public class Candidate { [JsonPropertyName("content")] public Content? Content { get; set; } }
 public class Content { [JsonPropertyName("parts")] public Part[]? Parts { get; set; } }
-#if NET472
-public class Part { [JsonPropertyName("text")] public string Text { get; set; } }
-#else
-public class Part { [JsonPropertyName("text")] public required string Text { get; set; } }
-#endif
+public class Part { [JsonPropertyName("text")] public string? Text { get; set; } }
 #endregion
 
 #region Git & Repo Helpers
@@ -423,11 +420,7 @@ public class CommitDialogWatcher : IDisposable
 
             // Quick filters to ignore irrelevant windows
             if (!this.tgitProcessIds.Contains(openedWindow.Current.ProcessId)) return;
-#if NET472
-            if (openedWindow.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) == -1) return;
-#else
-            if (!openedWindow.Current.Name.Contains("Commit", StringComparison.OrdinalIgnoreCase)) return;
-#endif
+            if (openedWindow.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) < 0) return;
 
             Console.WriteLine("\n--- Potential Commit Dialog Found by Event ---");
 
@@ -789,3 +782,7 @@ public class Program
         Console.ReadLine();
     }
 }
+
+#if NET472
+#pragma warning restore CS8632
+#endif

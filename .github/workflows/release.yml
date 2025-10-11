@@ -1,0 +1,90 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*" # Trigger on new tags like v1.0.0
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build net9.0-windows
+        run: dotnet build --configuration Release --framework net9.0-windows
+
+      - name: Publish net9.0-windows
+        run: dotnet publish --configuration Release --framework net9.0-windows --no-build --output ${{github.workspace}}/publish/net9.0-windows
+
+      - name: Zip net9.0-windows build
+        run: Compress-Archive -Path ${{github.workspace}}/publish/net9.0-windows/* -DestinationPath ${{github.workspace}}/publish/TortoiseGitAI-net9.0-windows.zip
+
+      - name: Build and Publish net472 with Fody/Costura
+        run: dotnet publish --configuration Release --framework net472 --no-build --output ${{github.workspace}}/publish/net472
+
+      - name: Upload net9.0-windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TortoiseGitAI-net9.0-windows
+          path: ${{github.workspace}}/publish/TortoiseGitAI-net9.0-windows.zip
+
+      - name: Upload net472 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TortoiseGitAI-net472
+          path: ${{github.workspace}}/publish/net472
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+      - name: Upload net9.0-windows Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/TortoiseGitAI-net9.0-windows/TortoiseGitAI-net9.0-windows.zip
+          asset_name: TortoiseGitAI-net9.0-windows-${{ github.ref_name }}.zip
+          asset_content_type: application/zip
+
+      - name: Upload net472 Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: artifacts/TortoiseGitAI-net472/TortoiseGitAI.exe
+          asset_name: TortoiseGitAI-net472.exe
+          asset_content_type: application/vnd.microsoft.portable-executable
