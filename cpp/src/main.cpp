@@ -1,7 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
 
-#include <windows.h>
+#include <winsock2.h> // Must be included before windows.h
+#include <windows.h>  // For WinAPI
 #include <Wbemidl.h>
 #include <UIAutomation.h>
 #include <comdef.h>
@@ -24,7 +25,7 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "user32.lib")
-#pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 using json = nlohmann::json;
 
@@ -503,17 +504,23 @@ private:
         // Re-written to avoid C++11 raw string literals (R"()") for better compiler compatibility.
         // This prevents "C2001: newline in constant" errors with older toolsets.
         std::string prompt = "You are an expert git commit message generation tool. Based on the following git context "
-            "(recent commits, changed files, and full diff), create a concise, conventional commit message. "
-            "The message must have a short subject line (under 50 characters), a blank line, and then a brief "
-            "bulleted description of the most important changes. Your response MUST be only the raw commit message text. "
-            "DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n"
-            "Git Context:\n```\n" + gitContext + "\n```";
+                             "(recent commits, changed files, and full diff), create a concise, conventional commit message. "
+                             "The message must have a short subject line (under 50 characters), a blank line, and then a brief "
+                             "bulleted description of the most important changes. Your response MUST be only the raw commit message text. "
+                             "DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n"
+                             "Git Context:\n```\n" +
+                             gitContext + "\n```";
 
         std::cout << "--- Sending Request to Gemini ---" << std::endl;
         std::cout << "[Git Context Length]: " << gitContext.length() << " characters" << std::endl;
         std::cout << "---------------------------------" << std::endl;
 
-        auto future = std::async(std::launch::async, GeminiApiClient::GenerateCommitMessage, prompt);
+        // The Gemini API call is run on a separate thread using std::async to keep the UI updater running.
+        // With OpenSSL, we don't need to worry about COM apartment state for networking calls.
+        auto future = std::async(std::launch::async, [&prompt]() -> std::string
+                                 {
+            std::string result = GeminiApiClient::GenerateCommitMessage(prompt);
+            return result; });
 
         std::string initialMessage = "Generating AI commit message...";
         this->injector.SetCommitMessage(messageBox, initialMessage);
@@ -564,6 +571,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // freopen_s(&f, "CONOUT$", "w", stdout);
     // freopen_s(&f, "CONOUT$", "w", stderr);
     // freopen_s(&f, "CONIN$", "r", stdin);
+
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
+        MessageBox(NULL, "WSAStartup failed.", "Network Error", MB_OK | MB_ICONERROR);
+        return 1;
+    }
 
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(hr))
@@ -626,6 +640,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     pHandler->Release();
     CoUninitialize();
+    WSACleanup();
 
     return (int)msg.wParam;
 }

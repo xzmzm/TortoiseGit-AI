@@ -19,8 +19,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup vcpkg
+        uses: microsoft/vcpkg-action@v2
+        with:
+          vcpkg-version: '2023.10.19' # Use a specific version for cache stability
+
+      - name: Install OpenSSL using vcpkg
+        run: vcpkg install openssl:x64-windows --triplet x64-windows
+        env:
+          VCPKG_DEFAULT_TRIPLET: x64-windows
+
       - name: Configure C++ Project (CMake)
-        run: cmake -S cpp -B cpp/build
+        run: cmake -S cpp -B cpp/build -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
 
       - name: Build C++ Project (CMake)
         run: cmake --build cpp/build --config Release
