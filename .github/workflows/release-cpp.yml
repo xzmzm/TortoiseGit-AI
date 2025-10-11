@@ -18,14 +18,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
 
       - name: Install OpenSSL using vcpkg
         run: vcpkg install openssl:x64-windows --triplet x64-windows
-        env:
-          VCPKG_DEFAULT_TRIPLET: x64-windows
 
       - name: Configure C++ Project (CMake)
         run: cmake -S cpp -B cpp/build -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
