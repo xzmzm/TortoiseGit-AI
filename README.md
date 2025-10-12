@@ -24,9 +24,10 @@ TortoiseGitAI is a smart tool that automatically generates descriptive commit me
 
 1.  **Download the Executable**:
 
-    - Go to the [**Releases**](https://github.com/your-username/TortoiseGitAI/releases) page.
-    - You will find two versions available for download:
-      - `TortoiseGitAI-net472-vX.X.X.exe`: **(Recommended)** This is a single, self-contained executable built for .NET Framework 4.7.2. It should run on any modern Windows 10/11 system without needing to install anything extra.
+    - Go to the [**Releases**](https://github.com/xzmzm/TortoiseGit-AI/releases) page.
+    - You will find three versions available for download:
+      - `TortoiseGitAI-cpp-vX.X.X.exe`: **(Recommended)** This version is a native C++ application. It has the smallest footprint and no external runtime dependencies, making it the most lightweight option.
+      - `TortoiseGitAI-net472-vX.X.X.exe`: A good alternative built for .NET Framework 4.7.2. It's a single, self-contained executable that should run on any modern Windows 10/11 system without needing to install anything extra.
       - `TortoiseGitAI-net9.0-windows-vX.X.X.zip`: This version uses the latest .NET 9.0. It requires the [.NET 9.0 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) to be installed on your machine.
 
 2.  **A Note on Windows SmartScreen**:
@@ -35,8 +36,8 @@ TortoiseGitAI is a smart tool that automatically generates descriptive commit me
 
     **It is safe to run.** To proceed, click **"More info"** and then **"Run anyway"**.
 
-2.  **Place it Somewhere Convenient**:
-    - For the `net472` version, move the downloaded `.exe` file to a permanent location on your computer (e.g., `C:\Tools\`).
+3.  **Place it Somewhere Convenient**:
+    - For the `cpp` and `net472` versions, move the downloaded `.exe` file to a permanent location on your computer (e.g., `C:\Tools\`).
     - For the `net9.0` version, unzip the archive and move the contents to a permanent location.
 
 ## Configuration
