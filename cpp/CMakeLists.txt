@@ -7,18 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Make a console application. This will show a console window with debug output.
 add_executable(TortoiseGitAI src/main.cpp)
 
-# Find OpenSSL. This is required for HTTPS support via httplib.
-find_package(OpenSSL REQUIRED)
-
 target_include_directories(TortoiseGitAI PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/vendor"
-    "${OPENSSL_INCLUDE_DIR}"
 )
-
-# Use OpenSSL for HTTPS support.
-target_compile_definitions(TortoiseGitAI PRIVATE
-    CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # Link against necessary Windows libraries
 target_link_libraries(TortoiseGitAI
@@ -26,6 +18,5 @@ target_link_libraries(TortoiseGitAI
     ole32
     oleaut32
     wbemuuid
-    ws2_32      # for networking
-    ${OPENSSL_LIBRARIES}
+    winhttp     # for HTTPS requests
 )

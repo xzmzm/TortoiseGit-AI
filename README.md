@@ -2,7 +2,7 @@
 
 TortoiseGitAI is a smart tool that automatically generates descriptive commit messages for your changes using AI. It integrates seamlessly with [TortoiseGit](https://tortoisegit.org/) by monitoring for the commit dialog and using Google's Gemini AI to suggest a message based on your staged changes.
 
-![Demo GIF](https://github.com/user-attachments/assets/7a976a16-63d1-4122-995a-04b397ca4a2e)
+![Demo GIF](https://github.com/user-attachments/assets/51490335-8d53-4040-b092-a3d8dab61a1e)
 
 ## Features
 
@@ -23,11 +23,21 @@ TortoiseGitAI is a smart tool that automatically generates descriptive commit me
 ## Installation
 
 1.  **Download the Executable**:
+
     - Go to the [**Releases**](https://github.com/your-username/TortoiseGitAI/releases) page.
-    - Download the latest `TortoiseGitAI-net472-vX.X.X.exe` file. It's a single, self-contained executable.
+    - You will find two versions available for download:
+      - `TortoiseGitAI-net472-vX.X.X.exe`: **(Recommended)** This is a single, self-contained executable built for .NET Framework 4.7.2. It should run on any modern Windows 10/11 system without needing to install anything extra.
+      - `TortoiseGitAI-net9.0-windows-vX.X.X.zip`: This version uses the latest .NET 9.0. It requires the [.NET 9.0 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0) to be installed on your machine.
+
+2.  **A Note on Windows SmartScreen**:
+
+    When you first run the downloaded executable, Windows Defender SmartScreen might show a warning. This can happen with new applications that haven't built a reputation yet. The releases are code-signed to ensure their integrity.
+
+    **It is safe to run.** To proceed, click **"More info"** and then **"Run anyway"**.
 
 2.  **Place it Somewhere Convenient**:
-    - Move the downloaded `.exe` file to a permanent location on your computer (e.g., `C:\Tools\`).
+    - For the `net472` version, move the downloaded `.exe` file to a permanent location on your computer (e.g., `C:\Tools\`).
+    - For the `net9.0` version, unzip the archive and move the contents to a permanent location.
 
 ## Configuration
 
@@ -54,10 +64,12 @@ The tool reads the API key from an environment variable.
 ## How to Use
 
 1.  **Run the Tool**:
+
     - Double-click `TortoiseGitAI.exe` to start it.
     - A console window will appear, indicating that it is monitoring for the TortoiseGit commit dialog.
 
 2.  **Make it Run on Startup (Recommended)**:
+
     - Create a shortcut to `TortoiseGitAI.exe`.
     - Press `Win + R`, type `shell:startup`, and press Enter. This opens your Startup folder.
     - Move the shortcut you created into the Startup folder.
@@ -66,11 +78,11 @@ The tool reads the API key from an environment variable.
 3.  **Commit Your Changes with TortoiseGit**:
     - Right-click in your repository, go to the TortoiseGit menu, and click **"Commit..."**.
     - When the commit dialog opens, the tool will automatically:
-        1. Detect the window.
-        2. Display a "Generating..." message in the text box.
-        3. Run `git diff` to get the changes.
-        4. Send the diff to the Gemini API.
-        5. Inject the AI-generated commit message into the text box.
+      1. Detect the window.
+      2. Display a "Generating..." message in the text box.
+      3. Run `git diff` to get the changes.
+      4. Send the diff to the Gemini API.
+      5. Inject the AI-generated commit message into the text box.
     - Review the message, make any edits you like, and click **"Commit"**.
 
 ## How It Works

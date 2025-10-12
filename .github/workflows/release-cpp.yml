@@ -21,14 +21,8 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-
-      - name: Install OpenSSL using vcpkg
-        run: vcpkg install openssl:x64-windows --triplet x64-windows
-
       - name: Configure C++ Project (CMake)
-        run: cmake -S cpp -B cpp/build -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+        run: cmake -S cpp -B cpp/build
 
       - name: Build C++ Project (CMake)
         run: cmake --build cpp/build --config Release

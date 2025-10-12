@@ -1,8 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
 
-#include <winsock2.h> // Must be included before windows.h
 #include <windows.h>  // For WinAPI
+#include <winhttp.h>  // For WinHttp
 #include <Wbemidl.h>
 #include <UIAutomation.h>
 #include <comdef.h>
@@ -18,14 +18,13 @@
 #include <memory>
 #include <functional>
 
-#include "httplib.h"
 #include "json.hpp"
 
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "user32.lib")
-#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winhttp.lib")
 
 using json = nlohmann::json;
 
@@ -290,41 +289,95 @@ namespace GeminiApiClient
 
         json requestBody;
         requestBody["contents"][0]["parts"][0]["text"] = prompt;
+        std::string requestBodyStr = requestBody.dump();
 
-        httplib::Client cli("https://generativelanguage.googleapis.com");
+        std::wstring domain = L"generativelanguage.googleapis.com";
+        std::string path_str = "/v1beta/models/gemini-flash-lite-latest:generateContent?key=" + std::string(apiKey);
+        std::wstring path = ToWide(path_str);
 
-        std::string path = "/v1beta/models/gemini-flash-lite-latest:generateContent?key=" + std::string(apiKey);
+        DWORD dwStatusCode = 0;
+        std::string response_body;
+        std::string error_message;
+
+        HINTERNET hSession = NULL, hConnect = NULL, hRequest = NULL;
+
+        hSession = WinHttpOpen(L"TortoiseGitAI/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) { error_message = "WinHttpOpen failed"; goto cleanup; }
+
+        hConnect = WinHttpConnect(hSession, domain.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+        if (!hConnect) { error_message = "WinHttpConnect failed"; goto cleanup; }
+
+        hRequest = WinHttpOpenRequest(hConnect, L"POST", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        if (!hRequest) { error_message = "WinHttpOpenRequest failed"; goto cleanup; }
+
+        { // Scope for wstring headers
+            std::wstring headers = L"Content-Type: application/json";
+            if (!WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), (LPVOID)requestBodyStr.c_str(), (DWORD)requestBodyStr.length(), (DWORD)requestBodyStr.length(), 0))
+            {
+                error_message = "WinHttpSendRequest failed";
+                goto cleanup;
+            }
+        }
+
+        if (!WinHttpReceiveResponse(hRequest, NULL))
+        {
+            error_message = "WinHttpReceiveResponse failed";
+            goto cleanup;
+        }
+
+        { // Scope for status code query
+            DWORD dwSize = sizeof(dwStatusCode);
+            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &dwStatusCode, &dwSize, WINHTTP_NO_HEADER_INDEX);
+        }
+
+        { // Scope for reading response
+            DWORD dwSize = 0;
+            DWORD dwDownloaded = 0;
+            do
+            {
+                if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) { error_message = "WinHttpQueryDataAvailable failed"; goto cleanup; }
+                if (dwSize == 0) break;
+
+                std::vector<char> buffer(dwSize + 1, 0);
+                if (!WinHttpReadData(hRequest, (LPVOID)buffer.data(), dwSize, &dwDownloaded)) { error_message = "WinHttpReadData failed"; goto cleanup; }
+
+                response_body.append(buffer.data(), dwDownloaded);
+
+            } while (dwSize > 0);
+        }
+
+    cleanup:
+        if (!error_message.empty()) {
+            DWORD dwError = GetLastError();
+            error_message += " (Error code: " + std::to_string(dwError) + ")";
+        }
+
+        if (hRequest) WinHttpCloseHandle(hRequest);
+        if (hConnect) WinHttpCloseHandle(hConnect);
+        if (hSession) WinHttpCloseHandle(hSession);
+
+        if (!error_message.empty()) return "Error: " + error_message;
+
+        if (dwStatusCode != 200)
+        {
+            return "Error: API call failed with status " + std::to_string(dwStatusCode) + ". Details: " + response_body;
+        }
 
         try
         {
-            if (auto res = cli.Post(path.c_str(), requestBody.dump(), "application/json"))
+            json responseBody = json::parse(response_body);
+            if (responseBody.contains("candidates") && responseBody["candidates"].is_array() && !responseBody["candidates"].empty())
             {
-                if (res->status == 200)
+                if (responseBody["candidates"][0].contains("content") && responseBody["candidates"][0]["content"].contains("parts") && responseBody["candidates"][0]["content"]["parts"].is_array() && !responseBody["candidates"][0]["content"]["parts"].empty())
                 {
-                    json responseBody = json::parse(res->body);
-                    if (responseBody.contains("candidates") && responseBody["candidates"].is_array() && !responseBody["candidates"].empty())
-                    {
-                        if (responseBody["candidates"][0].contains("content") && responseBody["candidates"][0]["content"].contains("parts") && responseBody["candidates"][0]["content"]["parts"].is_array() && !responseBody["candidates"][0]["content"]["parts"].empty())
-                        {
-                            return responseBody["candidates"][0]["content"]["parts"][0]["text"];
-                        }
-                    }
-                    return "Error: Could not parse a valid response from the API.";
-                }
-                else
-                {
-                    return "Error: API call failed with status " + std::to_string(res->status) + ". Details: " + res->body;
+                    return responseBody["candidates"][0]["content"]["parts"][0]["text"];
                 }
             }
-            else
-            {
-                auto err = res.error();
-                return "Error: HTTP request failed: " + httplib::to_string(err);
-            }
+            return "Error: Could not parse a valid response from the API. Body: " + response_body;
         }
         catch (const std::exception &e)
         {
-            return "Error: An exception occurred while calling the API. " + std::string(e.what());
+            return "Error: Failed to parse API response JSON. " + std::string(e.what()) + ". Body: " + response_body;
         }
     }
 }
@@ -516,8 +569,8 @@ private:
         std::cout << "---------------------------------" << std::endl;
 
         // The Gemini API call is run on a separate thread using std::async to keep the UI updater running.
-        // With OpenSSL, we don't need to worry about COM apartment state for networking calls.
-        auto future = std::async(std::launch::async, [&prompt]() -> std::string
+        // WinHttp does not use COM, so it's safe to call from any thread.
+        auto future = std::async(std::launch::async, [prompt]() -> std::string
                                  {
             std::string result = GeminiApiClient::GenerateCommitMessage(prompt);
             return result; });
@@ -571,13 +624,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // freopen_s(&f, "CONOUT$", "w", stdout);
     // freopen_s(&f, "CONOUT$", "w", stderr);
     // freopen_s(&f, "CONIN$", "r", stdin);
-
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
-    {
-        MessageBox(NULL, "WSAStartup failed.", "Network Error", MB_OK | MB_ICONERROR);
-        return 1;
-    }
 
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(hr))
@@ -640,7 +686,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     pHandler->Release();
     CoUninitialize();
-    WSACleanup();
 
     return (int)msg.wParam;
 }
