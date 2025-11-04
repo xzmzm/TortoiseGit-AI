@@ -3,12 +3,9 @@
 #endif
 
 using System;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Management;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
@@ -20,6 +17,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Automation;
 using System.Windows.Forms;
+using System.Collections.Generic;
+using System.Management;
+using System.ComponentModel;
 
 #region Native Methods & TortoiseGitInjector
 internal static class NativeMethods
@@ -545,234 +545,12 @@ public class CommitDialogWatcher : IDisposable
 }
 #endregion
 
-#region Process Creation Watcher
-public class ProcessCreationWatcher : IDisposable
-{
-    private readonly ManagementEventWatcher watcher;
-    private const string ProcessName = "TortoiseGitProc.exe";
-
-    public ProcessCreationWatcher()
-    {
-        string query = $"SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process' AND TargetInstance.Name = '{ProcessName}'";
-        this.watcher = new ManagementEventWatcher(new WqlEventQuery(query));
-        this.watcher.EventArrived += this.OnProcessStarted;
-    }
-
-    public void Start()
-    {
-        Console.WriteLine($"Starting to watch for {ProcessName} launches to report arguments...");
-        this.watcher.Start();
-    }
-
-    public void Stop()
-    {
-        this.watcher.Stop();
-    }
-
-    private void OnProcessStarted(object sender, EventArrivedEventArgs e)
-    {
-        try
-        {
-            if (e.NewEvent["TargetInstance"] is not ManagementBaseObject targetInstance) { return; }
-
-            var commandLineObj = targetInstance["CommandLine"];
-            if (commandLineObj is not string commandLine || string.IsNullOrEmpty(commandLine)) { return; }
-
-            var processId = (uint)targetInstance["ProcessId"];
-
-            Console.WriteLine("\n--- TortoiseGitProc Launched ---");
-            Console.WriteLine($"Process ID:   {processId}");
-            Console.WriteLine($"Command Line: {commandLine}");
-
-            var pathFileMatch = Regex.Match(commandLine, @"/pathfile:""([^""]+)""");
-            if (pathFileMatch.Success)
-            {
-                string pathFile = pathFileMatch.Groups[1].Value;
-                Console.WriteLine($"-> Found pathfile: {pathFile}");
-
-                List<IntPtr> threadHandles = new List<IntPtr>();
-                try
-                {
-                    // Suspend the process to prevent it from deleting the file
-                    threadHandles = this.SuspendProcess((int)processId);
-                    if (threadHandles.Count == 0)
-                    {
-                        Console.WriteLine("-> Could not suspend process; it may have exited too quickly.");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"-> Process {processId} suspended with {threadHandles.Count} threads.");
-
-                        // Give a tiny moment for the file system to catch up, just in case.
-                        Thread.Sleep(50);
-
-                        if (File.Exists(pathFile))
-                        {
-                            var fileContent = File.ReadAllText(pathFile, Encoding.UTF8);
-                            Console.WriteLine("--- Pathfile Content ---");
-                            Console.WriteLine(fileContent);
-                            Console.WriteLine("------------------------");
-                        }
-                        else
-                        {
-                            Console.WriteLine("-> Pathfile was not found after suspending the process.");
-                        }
-                    }
-                }
-                finally
-                {
-                    if (threadHandles != null && threadHandles.Count > 0)
-                    {
-                        this.ResumeProcess(threadHandles);
-                        Console.WriteLine($"-> Process {processId} resumed.");
-                    }
-                }
-            }
-
-            Console.WriteLine("--------------------------------\n");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error processing process start event: {ex.Message}");
-        }
-    }
-
-    private List<IntPtr> SuspendProcess(int processId)
-    {
-        var threadHandles = new List<IntPtr>();
-        try
-        {
-            var process = Process.GetProcessById(processId);
-            foreach (ProcessThread pT in process.Threads)
-            {
-                IntPtr pOpenThread = NativeMethods.OpenThread(NativeMethods.ThreadAccess.SuspendResume, false, (uint)pT.Id);
-                if (pOpenThread != IntPtr.Zero)
-                {
-                    NativeMethods.SuspendThread(pOpenThread);
-                    threadHandles.Add(pOpenThread);
-                }
-            }
-        }
-        catch (ArgumentException)
-        {
-            // Process may have already exited
-            Console.WriteLine($"-> Process {processId} exited before it could be suspended.");
-            foreach (var handle in threadHandles) { NativeMethods.CloseHandle(handle); }
-            return new List<IntPtr>();
-        }
-        return threadHandles;
-    }
-
-    private void ResumeProcess(List<IntPtr> threadHandles)
-    {
-        foreach (var handle in threadHandles)
-        {
-            NativeMethods.ResumeThread(handle);
-            NativeMethods.CloseHandle(handle);
-        }
-    }
-
-    public void Dispose()
-    {
-        this.Stop();
-        this.watcher.Dispose();
-        GC.SuppressFinalize(this);
-    }
-}
-#endregion
-
-#region Temp File Watcher
-public class TempFileWatcher : IDisposable
-{
-    private readonly FileSystemWatcher? fileWatcher;
-    private readonly string watchPath;
-
-    public TempFileWatcher()
-    {
-        this.watchPath = Path.Combine(Path.GetTempPath(), "tortoisegit");
-        try
-        {
-            if (!Directory.Exists(this.watchPath))
-            {
-                Console.WriteLine($"Creating monitored directory: {this.watchPath}");
-                Directory.CreateDirectory(this.watchPath);
-            }
-
-            this.fileWatcher = new FileSystemWatcher(this.watchPath)
-            {
-                NotifyFilter = NotifyFilters.FileName, // Just need to know when a file is created.
-                IncludeSubdirectories = false
-            };
-            this.fileWatcher.Created += this.OnFileCreated;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"FATAL: Could not initialize TempFileWatcher for path '{this.watchPath}'. Error: {ex.Message}");
-            this.fileWatcher = null; // Ensure watcher is null so Start() doesn't throw.
-        }
-    }
-
-    public void Start()
-    {
-        if (this.fileWatcher == null) return;
-        Console.WriteLine($"Watching for temp files in: {this.watchPath}");
-        this.fileWatcher.EnableRaisingEvents = true;
-    }
-
-    public void Stop()
-    {
-        if (this.fileWatcher != null)
-        {
-            this.fileWatcher.EnableRaisingEvents = false;
-        }
-    }
-
-    private void OnFileCreated(object sender, FileSystemEventArgs e)
-    {
-        Console.WriteLine($"\n--- Temp File Detected: {e.Name} ---");
-        // Use a small, quick retry loop to handle the race condition where the file is created but not yet written/unlocked.
-        for (int i = 0; i < 5; i++)
-        {
-            try
-            {
-                // A small delay on the first try can be effective as the create event may fire before the write completes.
-                if (i == 0) Thread.Sleep(10);
-
-                string content = File.ReadAllText(e.FullPath, Encoding.UTF8);
-                Console.WriteLine("--- Pathfile Content (from FileSystemWatcher) ---");
-                Console.WriteLine(content);
-                Console.WriteLine("-------------------------------------------------");
-                return; // Success, exit the method.
-            }
-            catch (FileNotFoundException) { Console.WriteLine("-> File disappeared before it could be read."); break; }
-            catch (IOException) { if (i < 4) Thread.Sleep(20); } // File is likely locked. Wait and try again.
-            catch (Exception ex) { Console.WriteLine($"-> An unexpected error occurred while reading temp file: {ex.Message}"); break; }
-        }
-        Console.WriteLine("-> Could not read file content after multiple attempts.");
-        Console.WriteLine("---------------------------------------\n");
-    }
-
-    public void Dispose()
-    {
-        this.Stop();
-        this.fileWatcher?.Dispose();
-        GC.SuppressFinalize(this);
-    }
-}
-#endregion
-
 
 public class Program
 {
     [STAThread]
     public static void Main(string[] args)
     {
-        using var processWatcher = new ProcessCreationWatcher();
-        processWatcher.Start();
-
-        using var tempFileWatcher = new TempFileWatcher();
-        tempFileWatcher.Start();
-
         var injector = new TortoiseGitInjector();
         using var watcher = new CommitDialogWatcher(injector);
 
