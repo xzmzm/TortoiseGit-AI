@@ -381,46 +381,90 @@ public class CommitDialogWatcher : IDisposable
     private readonly TortoiseGitInjector injector;
     private readonly AutomationEventHandler windowOpenedHandler;
     private readonly HashSet<int> tgitProcessIds = new HashSet<int>();
+    private readonly System.Threading.Timer pollingTimer;
+    private int isProcessing = 0;
+    private bool disposed = false;
+    private readonly HashSet<IntPtr> processedDialogs = new HashSet<IntPtr>();
 
     public CommitDialogWatcher(TortoiseGitInjector injector)
     {
         this.injector = injector;
         // The handler delegate is stored in a field to prevent it from being garbage collected
         this.windowOpenedHandler = this.OnWindowOpened;
+        
+        // Initialize fallback polling timer
+        this.pollingTimer = new System.Threading.Timer(this.PollForCommitDialogs, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     public void Start()
     {
         Console.WriteLine("Starting event-driven monitoring for TortoiseGit commit dialog...");
         this.UpdateTgitProcessList();
-        Automation.AddAutomationEventHandler(
-            WindowPattern.WindowOpenedEvent,
-            AutomationElement.RootElement,
-            TreeScope.Children,
-            this.windowOpenedHandler);
+        
+        try
+        {
+            Automation.AddAutomationEventHandler(
+                WindowPattern.WindowOpenedEvent,
+                AutomationElement.RootElement,
+                TreeScope.Children,
+                this.windowOpenedHandler);
+            Console.WriteLine("UI Automation event handler registered successfully.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to register UI Automation event handler: {ex.Message}");
+            Console.WriteLine("Falling back to polling mode only.");
+        }
+        
+        // Start fallback polling every 2 seconds as a backup
+        this.pollingTimer.Change(TimeSpan.Zero, TimeSpan.FromSeconds(2));
+        Console.WriteLine("Fallback polling timer started (checks every 2 seconds).");
     }
 
     private void UpdateTgitProcessList()
     {
         this.tgitProcessIds.Clear();
-        foreach (var p in Process.GetProcessesByName("TortoiseGitProc"))
+        try
         {
-            this.tgitProcessIds.Add(p.Id);
+            foreach (var p in Process.GetProcessesByName("TortoiseGitProc"))
+            {
+                this.tgitProcessIds.Add(p.Id);
+            }
+            Console.WriteLine($"Updated TortoiseGit process list: {this.tgitProcessIds.Count} processes found.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error updating process list: {ex.Message}");
         }
     }
 
     private async void OnWindowOpened(object sender, AutomationEventArgs e)
     {
+        if (this.disposed) return;
+        
+        Console.WriteLine($"Window opened event triggered: {e.EventId}");
+        
         if (sender is not AutomationElement openedWindow) return;
 
         try
         {
+            Console.WriteLine($"Window opened: {openedWindow.Current.Name} (PID: {openedWindow.Current.ProcessId})");
+            
             // Refresh the process list in case TortoiseGitProc just started with this dialog
             this.UpdateTgitProcessList();
 
             // Quick filters to ignore irrelevant windows
-            if (!this.tgitProcessIds.Contains(openedWindow.Current.ProcessId)) return;
-            if (openedWindow.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) < 0) return;
+            if (!this.tgitProcessIds.Contains(openedWindow.Current.ProcessId))
+            {
+                Console.WriteLine($"Ignoring window - not a TortoiseGit process (PID: {openedWindow.Current.ProcessId})");
+                return;
+            }
+            
+            if (openedWindow.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                Console.WriteLine($"Ignoring window - name doesn't contain 'Commit': {openedWindow.Current.Name}");
+                return;
+            }
 
             Console.WriteLine("\n--- Potential Commit Dialog Found by Event ---");
 
@@ -429,9 +473,14 @@ public class CommitDialogWatcher : IDisposable
                 // We found it! Process it asynchronously to avoid blocking the UI event handler thread.
                 await this.ProcessCommitDialog(openedWindow, messageBox);
             }
+            else
+            {
+                Console.WriteLine("Window found but no message box detected.");
+            }
         }
         catch (ElementNotAvailableException)
         {
+            Console.WriteLine("Window opened event: Element not available (window closed quickly).");
             // The window might have closed very quickly, which is fine.
         }
         catch (Exception ex)
@@ -439,102 +488,204 @@ public class CommitDialogWatcher : IDisposable
             Console.WriteLine($"Error in event handler: {ex.Message}");
         }
     }
+    
+    private async void PollForCommitDialogs(object? state)
+    {
+        if (this.disposed) return;
+        
+        try
+        {
+            // Update process list periodically
+            this.UpdateTgitProcessList();
+            
+            // Find all top-level windows for TortoiseGit processes
+            foreach (int processId in this.tgitProcessIds)
+            {
+                try
+                {
+                    var process = Process.GetProcessById(processId);
+                    if (process.HasExited) continue;
+                    
+                    // Find all windows for this process
+                    foreach (ProcessThread thread in process.Threads)
+                    {
+                        // This is a simplified approach - in a real implementation,
+                        // you might want to use EnumWindows API for more reliable window enumeration
+                        var windows = AutomationElement.RootElement.FindAll(
+                            TreeScope.Children,
+                            new PropertyCondition(AutomationElement.ProcessIdProperty, processId));
+                            
+                        foreach (AutomationElement window in windows)
+                        {
+                            try
+                            {
+                                if (window.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) >= 0)
+                                {
+                                    Console.WriteLine($"\n--- Commit Dialog Found by Polling: {window.Current.Name} ---");
+                                    
+                                    if (this.injector.TryFindMessageBox(window, out var messageBox) && messageBox != null)
+                                    {
+                                        await this.ProcessCommitDialog(window, messageBox);
+                                        return; // Process one at a time
+                                    }
+                                }
+                            }
+                            catch (ElementNotAvailableException)
+                            {
+                                // Window might have closed
+                                continue;
+                            }
+                        }
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // Process has exited
+                    continue;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during polling: {ex.Message}");
+        }
+    }
 
     private async Task ProcessCommitDialog(AutomationElement commitDialog, AutomationElement messageBox)
     {
-        string? existingText = this.injector.GetCommitMessage(messageBox);
-        if (existingText == null) return;
-
-        this.injector.SetCommitMessage(messageBox, "Generating commit message... [Detecting repository]");
-        string? repoRoot = RepoFinder.FindRepoRootFromDialog(commitDialog);
-
-        if (string.IsNullOrEmpty(repoRoot))
-        {
-            this.injector.SetCommitMessage(messageBox, "Error: Could not determine Git repository root.");
-            return;
-        }
-
-        this.injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
-        string gitContext = await GitDiffHelper.GetDiffAsync(repoRoot);
-
-        if (gitContext.StartsWith("Error:"))
-        {
-            this.injector.SetCommitMessage(messageBox, gitContext);
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(gitContext))
-        {
-            this.injector.SetCommitMessage(messageBox, "No changes detected to commit.");
-            Console.WriteLine("No changes detected. Aborting AI generation.");
-            return;
-        }
-
-        string prompt = "You are an expert git commit message generation tool. " +
-                 "Based on the following git context (recent commits, changed files, and full diff), create a concise, conventional commit message. " +
-                 "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
-                 "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
-                 "Git Context:\n" +
-                 "```\n" +
-                 $"{gitContext}\n" +
-                 "```";
-
-        Console.WriteLine("--- Sending Request to Gemini ---");
-        Console.WriteLine($"[Existing Text]: {existingText}");
-        Console.WriteLine($"[Git Context Length]: {gitContext.Length} characters");
-        Console.WriteLine($"[Generated Prompt]:\n{prompt}");
-        Console.WriteLine("---------------------------------");
-
-        string initialMessage = "Generating AI commit message...";
-        this.injector.SetCommitMessage(messageBox, initialMessage);
-        var stopwatch = Stopwatch.StartNew();
-
-        var apiTask = GeminiApiClient.GenerateCommitMessageAsync(prompt);
-
-        while (!apiTask.IsCompleted)
-        {
-            await Task.WhenAny(apiTask, Task.Delay(1000));
-            if (apiTask.IsCompleted) break;
-
-            try
-            {
-                var elapsedSeconds = (int)Math.Round(stopwatch.Elapsed.TotalSeconds);
-                if (elapsedSeconds > 0)
-                {
-                    this.injector.SetCommitMessage(messageBox, $"{initialMessage} ({elapsedSeconds}s)");
-                }
-            }
-            catch (ElementNotAvailableException)
-            {
-                Console.WriteLine("Commit dialog closed while generating message. Aborting.");
-                stopwatch.Stop();
-                return;
-            }
-        }
-
-        stopwatch.Stop();
-        string finalMessage = await apiTask;
-
+        IntPtr dialogHandle;
         try
         {
-            // Re-check if element is available before setting final message.
-            _ = messageBox.Current.Name;
+            dialogHandle = new IntPtr(commitDialog.Current.NativeWindowHandle);
         }
         catch (ElementNotAvailableException)
         {
-            Console.WriteLine("Commit dialog closed before setting final message.");
-            return;
+            return; // Dialog closed before we could get its handle.
         }
 
-        if (finalMessage.Contains("[") && (finalMessage.Contains("Insert") || finalMessage.Contains("Issue") || finalMessage.Contains("Your ")))
+        // If we've already decided to process or ignore this specific dialog window, don't try again.
+        if (this.processedDialogs.Contains(dialogHandle)) return;
+
+        // Atomically check if another process is running and set the flag.
+        if (Interlocked.CompareExchange(ref this.isProcessing, 1, 0) != 0)
         {
-            Console.WriteLine("!!! WARNING: AI returned a template. Falling back to a default message. !!!");
-            finalMessage = "chore: Minor update";
+            return; // Already processing, so we skip this request.
         }
 
-        this.injector.SetCommitMessage(messageBox, finalMessage.Trim());
+        // Stop the polling timer while we are busy generating the commit message.
+        this.pollingTimer.Change(Timeout.Infinite, Timeout.Infinite);
 
-        Console.WriteLine($"Message set. Waiting for next event...");
+        try
+        {
+            // Mark this dialog as "processed" up front. This prevents re-entry from polls
+            // or events for this dialog instance, regardless of success or failure below.
+            this.processedDialogs.Add(dialogHandle);
+            Console.WriteLine($"Processing dialog {dialogHandle} for the first time.");
+
+            string? existingText = this.injector.GetCommitMessage(messageBox);
+            if (existingText == null) return;
+
+            this.injector.SetCommitMessage(messageBox, "Generating commit message... [Detecting repository]");
+            string? repoRoot = RepoFinder.FindRepoRootFromDialog(commitDialog);
+
+            if (string.IsNullOrEmpty(repoRoot))
+            {
+                this.injector.SetCommitMessage(messageBox, "Error: Could not determine Git repository root.");
+                return;
+            }
+
+            this.injector.SetCommitMessage(messageBox, $"Generating commit message... [Repo: {Path.GetFileName(repoRoot)}]");
+            string gitContext = await GitDiffHelper.GetDiffAsync(repoRoot);
+
+            if (gitContext.StartsWith("Error:"))
+            {
+                this.injector.SetCommitMessage(messageBox, gitContext);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(gitContext))
+            {
+                this.injector.SetCommitMessage(messageBox, "No changes detected to commit.");
+                Console.WriteLine("No changes detected. Aborting AI generation.");
+                return;
+            }
+
+            string prompt = "You are an expert git commit message generation tool. " +
+                     "Based on the following git context (recent commits, changed files, and full diff), create a concise, conventional commit message. " +
+                     "The message must have a short subject line (under 50 characters), a blank line, and then a brief bulleted description of the most important changes. " +
+                     "Your response MUST be only the raw commit message text. DO NOT include explanations, options, markdown formatting, or placeholders like '[Your ID]'.\n\n" +
+                     "Git Context:\n" +
+                     "```\n" +
+                     $"{gitContext}\n" +
+                     "```";
+
+            Console.WriteLine("--- Sending Request to Gemini ---");
+            Console.WriteLine($"[Existing Text]: {existingText}");
+            Console.WriteLine($"[Git Context Length]: {gitContext.Length} characters");
+            Console.WriteLine($"[Generated Prompt]:\n{prompt}");
+            Console.WriteLine("---------------------------------");
+
+            string initialMessage = "Generating AI commit message...";
+            this.injector.SetCommitMessage(messageBox, initialMessage);
+            var stopwatch = Stopwatch.StartNew();
+
+            var apiTask = GeminiApiClient.GenerateCommitMessageAsync(prompt);
+
+            while (!apiTask.IsCompleted)
+            {
+                await Task.WhenAny(apiTask, Task.Delay(1000));
+                if (apiTask.IsCompleted) break;
+
+                try
+                {
+                    var elapsedSeconds = (int)Math.Round(stopwatch.Elapsed.TotalSeconds);
+                    if (elapsedSeconds > 0)
+                    {
+                        this.injector.SetCommitMessage(messageBox, $"{initialMessage} ({elapsedSeconds}s)");
+                    }
+                }
+                catch (ElementNotAvailableException)
+                {
+                    Console.WriteLine("Commit dialog closed while generating message. Aborting.");
+                    stopwatch.Stop();
+                    return;
+                }
+            }
+
+            stopwatch.Stop();
+            string finalMessage = await apiTask;
+
+            try
+            {
+                // Re-check if element is available before setting final message.
+                _ = messageBox.Current.Name;
+            }
+            catch (ElementNotAvailableException)
+            {
+                Console.WriteLine("Commit dialog closed before setting final message.");
+                return;
+            }
+
+            if (finalMessage.Contains("[") && (finalMessage.Contains("Insert") || finalMessage.Contains("Issue") || finalMessage.Contains("Your ")))
+            {
+                Console.WriteLine("!!! WARNING: AI returned a template. Falling back to a default message. !!!");
+                finalMessage = "chore: Minor update";
+            }
+
+            this.injector.SetCommitMessage(messageBox, finalMessage.Trim());
+
+            Console.WriteLine($"Message set for handle {dialogHandle}. Waiting for next event...");
+        }
+        finally
+        {
+            // Restart the polling timer.
+            if (!this.disposed)
+            {
+                this.pollingTimer.Change(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+            }
+            // Release the processing flag.
+            Interlocked.Exchange(ref this.isProcessing, 0);
+        }
     }
 
     public void Dispose()
