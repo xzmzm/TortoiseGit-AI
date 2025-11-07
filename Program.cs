@@ -505,36 +505,31 @@ public class CommitDialogWatcher : IDisposable
                 {
                     var process = Process.GetProcessById(processId);
                     if (process.HasExited) continue;
-                    
+
                     // Find all windows for this process
-                    foreach (ProcessThread thread in process.Threads)
+                    var windows = AutomationElement.RootElement.FindAll(
+                        TreeScope.Children,
+                        new PropertyCondition(AutomationElement.ProcessIdProperty, processId));
+
+                    foreach (AutomationElement window in windows)
                     {
-                        // This is a simplified approach - in a real implementation,
-                        // you might want to use EnumWindows API for more reliable window enumeration
-                        var windows = AutomationElement.RootElement.FindAll(
-                            TreeScope.Children,
-                            new PropertyCondition(AutomationElement.ProcessIdProperty, processId));
-                            
-                        foreach (AutomationElement window in windows)
+                        try
                         {
-                            try
+                            if (window.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
-                                if (window.Current.Name.IndexOf("Commit", StringComparison.OrdinalIgnoreCase) >= 0)
+                                Console.WriteLine($"\n--- Commit Dialog Found by Polling: {window.Current.Name} ---");
+
+                                if (this.injector.TryFindMessageBox(window, out var messageBox) && messageBox != null)
                                 {
-                                    Console.WriteLine($"\n--- Commit Dialog Found by Polling: {window.Current.Name} ---");
-                                    
-                                    if (this.injector.TryFindMessageBox(window, out var messageBox) && messageBox != null)
-                                    {
-                                        await this.ProcessCommitDialog(window, messageBox);
-                                        return; // Process one at a time
-                                    }
+                                    await this.ProcessCommitDialog(window, messageBox);
+                                    return; // Process one at a time
                                 }
                             }
-                            catch (ElementNotAvailableException)
-                            {
-                                // Window might have closed
-                                continue;
-                            }
+                        }
+                        catch (ElementNotAvailableException)
+                        {
+                            // Window might have closed
+                            continue;
                         }
                     }
                 }
