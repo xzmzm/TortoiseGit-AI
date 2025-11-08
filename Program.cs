@@ -380,6 +380,7 @@ public class CommitDialogWatcher : IDisposable
 {
     private readonly TortoiseGitInjector injector;
     private readonly AutomationEventHandler windowOpenedHandler;
+    private readonly AutomationEventHandler windowClosedHandler;
     private readonly HashSet<int> tgitProcessIds = new HashSet<int>();
     private readonly System.Threading.Timer pollingTimer;
     private int isProcessing = 0;
@@ -389,8 +390,9 @@ public class CommitDialogWatcher : IDisposable
     public CommitDialogWatcher(TortoiseGitInjector injector)
     {
         this.injector = injector;
-        // The handler delegate is stored in a field to prevent it from being garbage collected
+        // Handler delegates are stored in fields to prevent them from being garbage collected
         this.windowOpenedHandler = this.OnWindowOpened;
+        this.windowClosedHandler = this.OnWindowClosed;
         
         // Initialize fallback polling timer
         this.pollingTimer = new System.Threading.Timer(this.PollForCommitDialogs, null, Timeout.Infinite, Timeout.Infinite);
@@ -408,6 +410,11 @@ public class CommitDialogWatcher : IDisposable
                 AutomationElement.RootElement,
                 TreeScope.Children,
                 this.windowOpenedHandler);
+            Automation.AddAutomationEventHandler(
+                WindowPattern.WindowClosedEvent,
+                AutomationElement.RootElement,
+                TreeScope.Children,
+                this.windowClosedHandler);
             Console.WriteLine("UI Automation event handler registered successfully.");
         }
         catch (Exception ex)
@@ -489,6 +496,26 @@ public class CommitDialogWatcher : IDisposable
         }
     }
     
+    private void OnWindowClosed(object sender, AutomationEventArgs e)
+    {
+        if (this.disposed) return;
+        if (sender is not AutomationElement closedWindow) return;
+
+        try
+        {
+            // The handle should be available right as it closes.
+            var dialogHandle = new IntPtr(closedWindow.Current.NativeWindowHandle);
+            if (this.processedDialogs.Remove(dialogHandle))
+            {
+                Console.WriteLine($"Dialog {dialogHandle} closed. Removed from processed list.");
+            }
+        }
+        catch (ElementNotAvailableException)
+        {
+            // This is expected if the window is gone completely. We can't clean up this handle, but we tried.
+        }
+    }
+
     private async void PollForCommitDialogs(object? state)
     {
         if (this.disposed) return;
@@ -642,6 +669,10 @@ public class CommitDialogWatcher : IDisposable
                 catch (ElementNotAvailableException)
                 {
                     Console.WriteLine("Commit dialog closed while generating message. Aborting.");
+                    if (this.processedDialogs.Remove(dialogHandle))
+                    {
+                        Console.WriteLine($"Cleaned up handle {dialogHandle} after dialog closed during generation.");
+                    }
                     stopwatch.Stop();
                     return;
                 }
@@ -658,6 +689,10 @@ public class CommitDialogWatcher : IDisposable
             catch (ElementNotAvailableException)
             {
                 Console.WriteLine("Commit dialog closed before setting final message.");
+                if (this.processedDialogs.Remove(dialogHandle))
+                {
+                    Console.WriteLine($"Cleaned up handle {dialogHandle} after dialog closed before completion.");
+                }
                 return;
             }
 
@@ -685,7 +720,17 @@ public class CommitDialogWatcher : IDisposable
 
     public void Dispose()
     {
-        Automation.RemoveAutomationEventHandler(WindowPattern.WindowOpenedEvent, AutomationElement.RootElement, this.windowOpenedHandler);
+        if (this.disposed) return;
+        this.disposed = true;
+
+        this.pollingTimer.Dispose();
+
+        try { Automation.RemoveAutomationEventHandler(WindowPattern.WindowOpenedEvent, AutomationElement.RootElement, this.windowOpenedHandler); }
+        catch (Exception) { /* Best effort on shutdown */ }
+
+        try { Automation.RemoveAutomationEventHandler(WindowPattern.WindowClosedEvent, AutomationElement.RootElement, this.windowClosedHandler); }
+        catch (Exception) { /* Best effort on shutdown */ }
+
         GC.SuppressFinalize(this);
     }
 }
