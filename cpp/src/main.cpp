@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>  // For WinAPI
+#include <ole2.h>
 #include <winhttp.h>  // For WinHttp
 #include <UIAutomation.h>
 #include <comdef.h>
