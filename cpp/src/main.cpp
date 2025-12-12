@@ -3,7 +3,6 @@
 
 #include <windows.h>  // For WinAPI
 #include <winhttp.h>  // For WinHttp
-#include <Wbemidl.h>
 #include <UIAutomation.h>
 #include <comdef.h>
 #include <atlbase.h>
@@ -20,7 +19,6 @@
 
 #include "json.hpp"
 
-#pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "user32.lib")
@@ -188,82 +186,54 @@ namespace GitDiffHelper
 
 namespace RepoFinder
 {
-    std::string GetPathFromProcess(DWORD processId)
-    {
-        CComPtr<IWbemLocator> pLoc;
-        HRESULT hres = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID *)&pLoc);
-        if (FAILED(hres))
-            return "";
-
-        CComPtr<IWbemServices> pSvc;
-        hres = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
-        if (FAILED(hres))
-            return "";
-
-        hres = CoSetProxyBlanket(pSvc, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
-        if (FAILED(hres))
-            return "";
-
-        CComPtr<IEnumWbemClassObject> pEnumerator;
-        std::wstring query = L"SELECT CommandLine FROM Win32_Process WHERE ProcessId = " + std::to_wstring(processId);
-        hres = pSvc->ExecQuery(_bstr_t(L"WQL"), _bstr_t(query.c_str()), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL, &pEnumerator);
-        if (FAILED(hres))
-            return "";
-
-        CComPtr<IWbemClassObject> pclsObj;
-        ULONG uReturn = 0;
-        std::string commandLine;
-        if (pEnumerator && pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK && uReturn != 0)
-        {
-            VARIANT vtProp;
-            if (SUCCEEDED(pclsObj->Get(L"CommandLine", 0, &vtProp, 0, 0)) && vtProp.vt == VT_BSTR)
-            {
-                commandLine = ToNarrow(vtProp.bstrVal);
-            }
-            VariantClear(&vtProp);
-        }
-
-        if (commandLine.empty())
-            return "";
-
-        // Re-written to avoid C++11 raw string literals (R"()") for better compiler compatibility.
-        std::smatch match;
-        std::regex re("/path:\"([^\"]+)\"");
-        if (std::regex_search(commandLine, match, re) && match.size() > 1)
-        {
-            return match[1].str();
-        }
-        return "";
-    }
-
     std::string FindRepoRootFromDialog(CComPtr<IUIAutomationElement> commitDialog)
     {
         try
         {
-            int processId;
-            commitDialog->get_CurrentProcessId(&processId);
-            std::string startingPath = GetPathFromProcess(processId);
+            BSTR nameBSTR;
+            if (FAILED(commitDialog->get_CurrentName(&nameBSTR)) || !nameBSTR)
+                return "";
 
-            if (startingPath.empty())
+            std::string title = ToNarrow(nameBSTR);
+            SysFreeString(nameBSTR);
+
+            std::string startingPath;
+
+            // Strategy 1: Look for " - Commit" suffix
+            // TortoiseGit titles are typically "Path - Commit - TortoiseGit" or similar.
+            size_t pos = title.find(" - Commit");
+            if (pos != std::string::npos)
             {
-                std::cout << "Could not find path from command line, trying window title as fallback." << std::endl;
-                BSTR nameBSTR;
-                commitDialog->get_CurrentName(&nameBSTR);
-                std::string title = ToNarrow(nameBSTR);
-                SysFreeString(nameBSTR);
-
-                size_t pos = title.find(" - Commit");
-                if (pos != std::string::npos)
+                startingPath = title.substr(0, pos);
+            }
+            else
+            {
+                // Strategy 2: Regex fallback
+                // Looks for drive letter path: C:\Path\To\Repo
+                // Matches C# regex: @"([A-Z]:\\[^-\r\n]+)"
+                std::regex re("([a-zA-Z]:\\\\[^-\\r\\n]+)");
+                std::smatch match;
+                if (std::regex_search(title, match, re) && match.size() > 1)
                 {
-                    startingPath = title.substr(0, pos);
+                    startingPath = match[1].str();
+
+                    // Trim whitespace
+                    const char *ws = " \t\n\r\f\v";
+                    size_t start = startingPath.find_first_not_of(ws);
+                    if (start != std::string::npos)
+                    {
+                        size_t end = startingPath.find_last_not_of(ws);
+                        startingPath = startingPath.substr(start, end - start + 1);
+                    }
                 }
             }
 
             if (startingPath.empty())
             {
-                std::cout << "Could not determine a starting path." << std::endl;
+                std::cout << "Could not determine a starting path from title: '" << title << "'" << std::endl;
                 return "";
             }
+
             std::cout << "Found starting path: " << startingPath << std::endl;
             return startingPath;
         }
@@ -594,6 +564,27 @@ private:
         }
 
         std::string finalMessage = future.get();
+
+        // Check for template placeholders (matches C# logic)
+        if (finalMessage.find("[") != std::string::npos &&
+            (finalMessage.find("Insert") != std::string::npos ||
+             finalMessage.find("Issue") != std::string::npos ||
+             finalMessage.find("Your ") != std::string::npos))
+        {
+            std::cout << "!!! WARNING: AI returned a template. Falling back to a default message. !!!" << std::endl;
+            finalMessage = "chore: Minor update";
+        }
+
+        // Trim final message
+        const char *ws = " \t\n\r\f\v";
+        size_t first = finalMessage.find_first_not_of(ws);
+        if (first == std::string::npos)
+            finalMessage = "";
+        else
+        {
+            size_t last = finalMessage.find_last_not_of(ws);
+            finalMessage = finalMessage.substr(first, last - first + 1);
+        }
 
         UIA_HWND hwnd;
         if (FAILED(messageBox->get_CurrentNativeWindowHandle(&hwnd)) || !IsWindow(static_cast<HWND>(hwnd)))

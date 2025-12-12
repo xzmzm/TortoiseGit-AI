@@ -17,6 +17,5 @@ target_link_libraries(TortoiseGitAI
     user32
     ole32
     oleaut32
-    wbemuuid
     winhttp     # for HTTPS requests
 )
